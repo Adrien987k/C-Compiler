@@ -5,8 +5,10 @@ let first_lines =
   ("\t.file   \"prog.c\"\n" ^
    "\t.section    .rodata\n" ^
    ".LC0:\n" ^
-   "\t.string \"La valeur du registre est: %d\\n\"\n" ^
-   "\t.text\n" ^
+   "\t.string \"La valeur du registre est: %d\\n\"\n")
+
+let after_global_dec =
+  ("\t.text\n" ^
    "\t.globl  main\n" ^
    "\t.type   main, @function\n" ^
    "main:\n" ^
@@ -20,16 +22,29 @@ let last_lines =
    "\t.ident  \"GCC: (Ubuntu 5.4.0-6ubuntu1~16.04.5) 5.4.0 20160609\"\n" ^
    "\t.section         .note.GNU-stack,\"\",@progbits\n")
 
+type env = {
+  mutable locals : (string * int) list;
+  mutable globals : string list;
+  mutable functions : (string * int) list;
+}
 
 let rec compile out decl_list =
   let write = Printf.fprintf out "%s" in
- 
+
   write first_lines;
-  
-  let rec compile_var_dec var_dec env =
+
+  let rec compile_var_dec var_dec offset is_global env =
     match var_dec with
-    | CDECL (loc, str) -> env
-    | CFUN (loc, str, fun_var_dec_list, loc_code) -> env
+    | CDECL (loc, str) ->
+        if is_global then
+          let _ = env.globals <- (str :: env.globals); in
+          let _ =  write ("\t.comm   " ^ str ^ ",4,4\n"); in
+          env
+        else
+          let _ = write ("\tmovq   $0, " ^ "(offset - 4) " ^ "(%rbp)\n"); in
+          env
+    | CFUN (loc, str, fun_var_dec_list, loc_code) ->
+        env
 
   and compile_code code env =
     match code with
@@ -42,7 +57,7 @@ let rec compile out decl_list =
       | None -> write "\tmovq   0, %rax "
       | Some expr ->
         let env = compile_expr expr env in
-        write "\tmov   %rax "
+        env
 
   and compile_expr loc_expr env =
     let _, expr = loc_expr in
@@ -87,9 +102,10 @@ let rec compile out decl_list =
     match decl_list with
     | [] -> ()
     | var_dec :: decl_list_next ->
-        let env = compile_var_dec var_dec env in
+        let env = compile_var_dec var_dec (-4) true env in
         compile_aux out decl_list_next env
   in
-  let env = [] in
+  let env = { locals = []; globals = []; functions = [] } in
   let _ = compile_aux out decl_list env in
-  write last_lines
+  write after_global_dec;
+  write last_lines;
