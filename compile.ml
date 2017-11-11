@@ -26,6 +26,7 @@ type env = {
   mutable locals : (string * int) list;
   mutable globals : string list;
   mutable functions : (string * int) list;
+  mutable current_offset : int;
 }
 
 let contain_global env str = 
@@ -41,35 +42,70 @@ let find_local env str =
   with
     Not_found -> None
 
+let empty_env = { locals = []; globals = []; functions = []; current_offset = (-4) }
+
+let new_env locs globs fcts offset =
+   { locals = locs; globals = globs; functions = fcts; current_offset = offset }
+
 let rec compile out decl_list =
   let write = Printf.fprintf out "%s" in
 
-  let rec compile_var_dec var_dec offset is_global env =
+  let print_env env = 
+    write ("\n\t--- ENV ---\n\tLOCALS:\n");
+    List.iter 
+    (fun loc_var -> let name, offset = loc_var in
+                    write ("\t" ^ name ^ " : " ^ (string_of_int offset) ^ "\n") 
+    ) 
+    env.locals;
+    write ("\tGLOBALS:\n");
+    List.iter (fun name -> write ("\t" ^ name ^ "\n")) env.globals;
+    write "\tFUNCTIONS:\n";
+    List.iter 
+    (fun fct -> let name, addr = fct in
+                write ("\t" ^ name ^ " : " ^ (string_of_int addr) ^ "\n")
+    )
+    env.functions;
+    write "\t--- END OF ENV ---\n\n";
+  in
+
+  let rec compile_var_dec env var_dec is_global is_main =
     match var_dec with
     | CDECL (_, str) ->
-        let _ = write "\nTEST DEC\n" in
         if is_global then
           let _ = env.globals <- (str :: env.globals) in
           let _ = write ("\t.comm   " ^ str ^ ",8,8\n") in
           env
-        else
-          let _ = env.locals <- ((str, offset) :: env.locals) in
-          let _ = write ("\tmovq   $0, " ^ (string_of_int offset) ^ "(%rbp)\n") in
+        else if not is_main then
+          let _ = env.locals <- ((str, env.current_offset) :: env.locals) in
+          let _ = write ("\tmovq   $0, " ^ (string_of_int env.current_offset) ^ "(%rbp)\n") in
+          let _ = env.current_offset <- (env.current_offset - 4) in 
           env
+        else env
     | CFUN (loc, str, fun_var_dec_list, (_, code)) ->
-        let _ = write "\nTEST FUN\n" in
-        let env = compile_decl_list fun_var_dec_list env in
+        if is_global then env else
+        let env = compile_decl_list env fun_var_dec_list in
         let _ = compile_code env code in env
 
   and compile_code env code = 
     match code with
     | CBLOCK (var_dec_list, code_list) ->
         let code_list = List.map (fun loc_code -> let _, code = loc_code in code) code_list in
-        let local_env = compile_decl_list var_dec_list env in
+        let local_env = new_env env.locals env.globals env.functions env.current_offset in
+        let local_env = compile_decl_list local_env var_dec_list in
         List.iter (compile_code local_env) code_list
     | CEXPR (_, expr) -> 
         compile_expr env expr
-    | CIF ((_, expr), (_, code1), (_, code2)) -> ()
+    | CIF ((_, expr), (_, code1), (_, code2)) ->
+        compile_expr env expr;
+        let true_label = genlab "true" in
+        let next_label = genlab "next" in
+        write "\tcmpq   %rax, 0\n";
+        write ("\tje " ^ true_label ^ "\n");
+        compile_code env code2;
+        write ("\tjmp " ^ next_label ^ "\n");
+        write (true_label ^ ":\n");
+        compile_code env code1;
+        write (next_label ^ ":\n");
     | CWHILE ((_, expr), (_, code)) -> ()
     | CRETURN expr_opt ->
       match expr_opt with
@@ -83,14 +119,15 @@ let rec compile out decl_list =
     | VAR str ->
         begin
           match find_local env str with
-          | None -> 
+          | None ->
               if contain_global env str 
               then write ("\tmovq   " ^ str ^ ", %rax\n")
-          | Some offset -> 
+              else failwith ("Error: unbound value " ^ str)  
+          | Some offset ->
               write ("\tmovq   " ^ (string_of_int offset) ^ "(%rbp), %rax\n")
         end
     | CST i -> 
-        write ("\tmovq   " ^ (string_of_int i) ^ ", %rax\n")
+        write ("\tmovq   $" ^ (string_of_int i) ^ ", %rax\n")
     | STRING str -> ()
     | SET_VAR (str, (_, expr1)) ->
         let _ = compile_expr env expr1 in
@@ -105,47 +142,96 @@ let rec compile out decl_list =
     | SET_ARRAY (str, expr1, expr2) -> ()
     | CALL (str, expr_list) -> ()
     | OP1 (mon_op, (_, expr)) ->
-        compile_mon_op env mon_op expr;
-    | OP2 (bin_op, (_, expr1), (_, expr2)) -> ()
-    | CMP (cmp_op, (_, expr1), (_, expr2)) -> ()
-    | EIF ((_, expr1), (_, expr2), (_, expr3)) -> ()
-    | ESEQ expr_list -> ()
+        compile_mon_op env mon_op expr
+    | OP2 (bin_op, (_, expr1), (_, expr2)) ->
+        compile_bin_op env bin_op expr1 expr2
+    | CMP (cmp_op, (_, expr1), (_, expr2)) ->
+        compile_cmp_op env cmp_op expr1 expr2
+    | EIF ((_, expr1), (_, expr2), (_, expr3)) ->
+        compile_eif env expr1 expr2 expr3
+    | ESEQ expr_list ->
+        let expr_list = List.map 
+                        (fun loc_expr -> let _, expr = loc_expr in expr)
+                        expr_list in 
+        List.iter (fun expr1 -> compile_expr env expr1) expr_list 
   
   and compile_mon_op env op expr =
-    let _ = compile_expr env expr in
+    compile_expr env expr;
     match op with
-    | M_MINUS -> write "\tneg   %rax"
-    | M_NOT -> write "\tnot   %rax"
-    | M_POST_INC -> write "\tinc   %rax"
-    | M_POST_DEC -> write "\tdec   %rax"
+    | M_MINUS -> write "\tneg   %rax\n"
+    | M_NOT -> write "\tnot   %rax\n"
+    | M_POST_INC -> write "\tinc   %rax\n"
+    | M_POST_DEC -> write "\tdec   %rax\n"
     | M_PRE_INC -> ()
     | M_PRE_DEC -> ()
 
-  and compile_bin_op op expr1 expr2 env =
+  and compile_bin_op env op expr1 expr2 =
+    compile_expr env expr1;
+    write "\tpushq   %rax\n";
+    compile_expr env expr2;
+    write "\tpopq   %rcx\n";
     match op with
-    | S_MUL -> env
-    | S_DIV -> env
-    | S_MOD -> env
-    | S_ADD -> env
-    | S_SUB -> env
-    | S_INDEX -> env
+    | S_MUL -> write "\timulq   %rcx, %rax\n"
+    | S_DIV ->
+        write "\tmovq   $0, %rdx\n"; 
+        write "\tidivq   %rcx\n"
+    | S_MOD ->
+        write "\tmovq   $0, %rdx\n";
+        write "\tidivq   %rcx\n";
+        write "\tmovq   %rdx, %rax\n";
+    | S_ADD -> write "\taddq   %rcx, %rax\n";
+    | S_SUB -> write "\tsubq   %rcx, %rax\n";
+    | S_INDEX -> ()
 
-  and compile_cmp_op op expr1 expr2 env =
-    match op with
-    | C_LT -> env
-    | C_LE -> env
-    | C_EQ -> env
-  
-  and compile_decl_list decl_list env =
-    match decl_list with
-    | [] -> env
-    | var_dec :: decl_list_next ->
-        let env = compile_var_dec var_dec (-4) true env in
-        compile_decl_list decl_list_next env
+  and compile_cmp_op env op expr1 expr2 =
+    compile_expr env expr1;
+    write "\tpushq   %rax\n";
+    compile_expr env expr2;
+    write "\tpopq   %rcx\n";
+    let asm_op = (match op with
+    | C_LT -> "jl"
+    | C_LE -> "jle"
+    | C_EQ -> "je") in
+    let label_true = genlab "true" in
+    let label_next = genlab "next" in
+    write "\tcmpq   %rcx, %rax\n";
+    write ("\t" ^ asm_op ^ " " ^ label_true ^ "\n");
+    write ("\tmovq   $0, %rax\n");
+    write ("\tjmp " ^ label_next ^ "\n");
+    write (label_true ^ ":\n\tmovq   $1, %rax\n");
+    write (label_next ^ ": \n");
+
+  and compile_eif env expr1 expr2 expr3 =
+    compile_expr env expr1;
+    let label_true = genlab "true" in
+    let label_next = genlab "next" in
+    write ("\tcmpq   %rax, $0\n");
+    write ("\tje " ^ label_true ^ "\n");
+    compile_expr env expr3;
+    write ("\tjmp " ^ label_next ^ "\n");
+    write (label_true ^ ":\n");
+    compile_expr env expr2;
+    write (label_next ^ ":\n");
+
+
+  and compile_decl_list env = List.fold_left
+                        (fun env var_dec -> compile_var_dec env var_dec false false)
+                        env
   in
 
-  let env = { locals = []; globals = []; functions = [] } in
+  let env = empty_env in
+
   write first_lines;
-  let _ = compile_decl_list decl_list env in
+
+  let env = List.fold_left 
+            (fun env var_dec -> compile_var_dec env var_dec true false)
+            env decl_list in
+  
   write after_global_dec;
+
+  let env = List.fold_left
+            (fun env var_dec -> compile_var_dec env var_dec false true)
+            env decl_list in
+  (* print_env env; *)
+  
   write last_lines;
