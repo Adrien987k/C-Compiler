@@ -2,8 +2,8 @@ open Cparse
 open Genlab
 
 let first_lines =
-  ("\t.file   \"test.c\"\n" ^
-   "\t.section    .rodata\n"(* ^
+  ("\t.file   \"test.c\"\n"(* ^
+   "\t.section    .rodata\n" ^
    ".LC0:\n" ^
    "\t.string \"La valeur du registre est: %d\\n\"\n"*))
 
@@ -16,7 +16,7 @@ let after_global_dec =
    "\tmovq   %rsp, %rbp\n")
 
 let last_lines =
-  ("\tleave\n" ^
+  ("\tpopq   %rbp\n" ^
    "\tret\n" ^
    "\t.size   main, .-main\n" ^
    "\t.ident  \"GCC: (Ubuntu 5.4.0-6ubuntu1~16.04.5) 5.4.0 20160609\"\n" ^
@@ -42,7 +42,7 @@ let find_local env str =
   with
     Not_found -> None
 
-let empty_env = { locals = []; globals = []; functions = []; current_offset = (-4) }
+let empty_env = { locals = []; globals = []; functions = []; current_offset = (-8) }
 
 let new_env locs globs fcts offset =
    { locals = locs; globals = globs; functions = fcts; current_offset = offset }
@@ -78,7 +78,7 @@ let rec compile out decl_list =
         else if not is_main then
           let _ = env.locals <- ((str, env.current_offset) :: env.locals) in
           let _ = write ("\tmovq   $0, " ^ (string_of_int env.current_offset) ^ "(%rbp)\n") in
-          let _ = env.current_offset <- (env.current_offset - 4) in 
+          let _ = env.current_offset <- (env.current_offset - 8) in 
           env
         else env
     | CFUN (loc, str, fun_var_dec_list, (_, code)) ->
@@ -97,21 +97,31 @@ let rec compile out decl_list =
         compile_expr env expr
     | CIF ((_, expr), (_, code1), (_, code2)) ->
         compile_expr env expr;
-        let true_label = genlab "true" in
+        let false_label = genlab "false" in
         let next_label = genlab "next" in
-        write "\tcmpq   %rax, 0\n";
-        write ("\tje " ^ true_label ^ "\n");
-        compile_code env code2;
-        write ("\tjmp " ^ next_label ^ "\n");
-        write (true_label ^ ":\n");
+        write "\tcmpq   $0, %rax\n";
+        write ("\tje " ^ false_label ^ "\n");
         compile_code env code1;
+        write ("\tjmp " ^ next_label ^ "\n");
+        write (false_label ^ ":\n");
+        compile_code env code2;
         write (next_label ^ ":\n");
-    | CWHILE ((_, expr), (_, code)) -> ()
+    | CWHILE ((_, expr), (_, code')) ->
+        compile_expr env expr;
+        let while_label = genlab "while" in
+        write (while_label ^ ":\n");
+        let next_label = genlab "next" in
+        write "\tcmpq   $0, %rax\n";
+        write ("\tje " ^ next_label ^ "\n");
+        compile_code env code';
+        compile_expr env expr;
+        write ("\tjmp   " ^ while_label ^ "\n");
+        write (next_label ^ ":\n");
     | CRETURN expr_opt ->
       match expr_opt with
-      | None -> 
-          write "\tmovq   0, %rax\n"
-      | Some (_, expr) -> 
+      | None ->
+          write "\tmovq   $0, %rax\n"
+      | Some (_, expr) ->
           compile_expr env expr
 
   and compile_expr env expr =
@@ -120,13 +130,13 @@ let rec compile out decl_list =
         begin
           match find_local env str with
           | None ->
-              if contain_global env str 
-              then write ("\tmovq   " ^ str ^ ", %rax\n")
-              else failwith ("Error: unbound value " ^ str)  
+              if contain_global env str
+              then write ("\tmovq   " ^ str ^ "(%rip), %rax\n")
+              else failwith ("Error: unbound value " ^ str)
           | Some offset ->
               write ("\tmovq   " ^ (string_of_int offset) ^ "(%rbp), %rax\n")
         end
-    | CST i -> 
+    | CST i ->
         write ("\tmovq   $" ^ (string_of_int i) ^ ", %rax\n")
     | STRING str -> ()
     | SET_VAR (str, (_, expr1)) ->
@@ -135,8 +145,8 @@ let rec compile out decl_list =
           match find_local env str with
           | None ->
               if contain_global env str
-              then write ("\tmovq   %rax, " ^ str ^ "\n")
-          | Some offset -> 
+              then write ("\tmovq   %rax, " ^ str ^  "(%rip)\n")
+          | Some offset ->
               write ("\tmovq   %rax, " ^ (string_of_int offset) ^ "(%rbp)\n")
         end
     | SET_ARRAY (str, expr1, expr2) -> ()
@@ -150,18 +160,29 @@ let rec compile out decl_list =
     | EIF ((_, expr1), (_, expr2), (_, expr3)) ->
         compile_eif env expr1 expr2 expr3
     | ESEQ expr_list ->
-        let expr_list = List.map 
+        let expr_list = List.map
                         (fun loc_expr -> let _, expr = loc_expr in expr)
-                        expr_list in 
-        List.iter (fun expr1 -> compile_expr env expr1) expr_list 
-  
+                        expr_list in
+        List.iter (fun expr1 -> compile_expr env expr1) expr_list
+
   and compile_mon_op env op expr =
     compile_expr env expr;
     match op with
     | M_MINUS -> write "\tneg   %rax\n"
     | M_NOT -> write "\tnot   %rax\n"
     | M_POST_INC -> write "\tinc   %rax\n"
-    | M_POST_DEC -> write "\tdec   %rax\n"
+    | M_POST_DEC -> 
+      write "\tdec   %rax\n";
+      let post_op = 
+        (match op with
+         | M_POST_INC -> "inc"
+         | M_POST_DEC -> "dec") in
+      (match expr with
+      | VAR str ->
+     
+          ()
+      | _ -> failwith "Error: cannot do ++ on this expression")
+
     | M_PRE_INC -> ()
     | M_PRE_DEC -> ()
 
@@ -173,7 +194,7 @@ let rec compile out decl_list =
     match op with
     | S_MUL -> write "\timulq   %rcx, %rax\n"
     | S_DIV ->
-        write "\tmovq   $0, %rdx\n"; 
+        write "\tmovq   $0, %rdx\n";
         write "\tidivq   %rcx\n"
     | S_MOD ->
         write "\tmovq   $0, %rdx\n";
@@ -196,16 +217,16 @@ let rec compile out decl_list =
     let label_next = genlab "next" in
     write "\tcmpq   %rcx, %rax\n";
     write ("\t" ^ asm_op ^ " " ^ label_true ^ "\n");
-    write ("\tmovq   $0, %rax\n");
+    write ("\tmovq   $1, %rax\n");
     write ("\tjmp " ^ label_next ^ "\n");
-    write (label_true ^ ":\n\tmovq   $1, %rax\n");
+    write (label_true ^ ":\n\tmovq   $0, %rax\n");
     write (label_next ^ ": \n");
 
   and compile_eif env expr1 expr2 expr3 =
     compile_expr env expr1;
     let label_true = genlab "true" in
     let label_next = genlab "next" in
-    write ("\tcmpq   %rax, $0\n");
+    write ("\tcmpq   $0, %rax\n");
     write ("\tje " ^ label_true ^ "\n");
     compile_expr env expr3;
     write ("\tjmp " ^ label_next ^ "\n");
