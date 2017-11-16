@@ -3,9 +3,7 @@ open Genlab
 
 let first_lines =
   ("\t.file   \"test.c\"\n" ^
-   "\t.section    .rodata\n" (*^
-   ".LC0:\n" ^
-   "\t.string \"La valeur du registre est: %d\\n\"\n"*))
+   "\t.section    .rodata\n" )
 
 let after_global_dec =
   ("\t.text\n" ^
@@ -17,7 +15,6 @@ let after_global_dec =
 
 let last_lines =
   ("\tleave\n" ^
-  (*"\tpopq   %rbp\n" ^*)
    "\tret\n" ^
    "\t.size   main, .-main\n" ^
    "\t.ident  \"GCC: (Ubuntu 5.4.0-6ubuntu1~16.04.5) 5.4.0 20160609\"\n" ^
@@ -168,7 +165,6 @@ let rec compile out decl_list =
           env
         else if not is_main then
           let _ = env.locals <- ((str, env.current_offset) :: env.locals) in
-         (* let _ = write ("\tmovq   $0, " ^ (string_of_int env.current_offset) ^ "(%rbp)\n") in*)
           let _ = env.current_offset <- (env.current_offset - 8) in
           env
         else env
@@ -230,15 +226,13 @@ let rec compile out decl_list =
         let var = find_var env str in
         write ("\tmovq   %rax, " ^ var ^ "\n")
     | SET_ARRAY (str, (_, expr1), (_, expr2)) ->
+        compile_expr env expr1;
+        write "\tpushq   %rax\n";
         compile_expr env expr2;
-        begin
-          match expr1 with
-          | VAR str ->
-              let var = find_var env str in
-              write ("\tmovq   " ^ var ^  ", %rcx\n");
-              write ("\tmovq   %rax, (%rcx, %rax, 8)\n");
-          | _ -> failwith "Error: in the affectation a[i]=e, a must be a variable"
-        end
+        write "\tpopq   %rcx\n";
+        let var = find_var env str in
+        write ("\tleal   " ^ var ^  ", %rdx\n");
+        write ("\tmovq   %rax, (%rdx, %rcx, 8)\n");
     | CALL (str, expr_list) -> ()
     | OP1 (mon_op, (_, expr)) ->
         compile_mon_op env mon_op expr
@@ -255,41 +249,61 @@ let rec compile out decl_list =
         List.iter (fun expr1 -> compile_expr env expr1) expr_list
 
   and compile_mon_op env op expr =
-    compile_expr env expr;
     match op with
-    | M_MINUS -> write "\tneg   %rax\n"
-    | M_NOT -> write "\tnot   %rax\n"
-    | M_POST_INC
-    | M_POST_DEC ->
-      let post_op =
+    | M_MINUS -> 
+        compile_expr env expr;
+        write "\tneg   %rax\n"
+    | M_NOT ->
+        compile_expr env expr;
+        write "\tnot   %rax\n"
+    | _ ->
+        let op, post =
         (match op with
-         | M_POST_INC -> "inc"
-         | M_POST_DEC -> "dec"
-         | _ -> "") in
-      begin
-      match expr with
-      | VAR str ->
-          let var = find_var env str in
-          write ("\tmovq   %rax, %rcx\n");
-          write ("\t" ^ post_op ^ "    %rcx\n");
-          write ("\tmovq   %rcx, " ^ var ^ "\n");
-      | _ -> failwith ("Error: cannot do " ^ post_op)
-      end
-    | M_PRE_INC
-    | M_PRE_DEC ->
-      let pre_op =
-        (match op with
-         | M_PRE_INC -> "inc"
-         | M_PRE_DEC -> "dec"
-         | _ -> "") in
-      begin
-      match expr with
-      | VAR str ->
-          let var = find_var env str in
-          write ("\t" ^ pre_op ^ "    %rax\n");
-          write ("\tmovq   %rax, " ^ var ^ "\n");
-      | _ -> failwith ("Error: cannot do " ^ pre_op)
-      end
+         | M_POST_INC -> ("inc", true)
+         | M_POST_DEC -> ("dec", true)
+         | M_PRE_INC -> ("inc", false)
+         | M_PRE_DEC -> ("dec", false)
+         | _ -> ("", false)) in
+        begin
+          match expr with
+          | VAR str ->
+              let var = find_var env str in
+              compile_expr env expr;
+              begin
+                match post with
+                | true ->
+                    write ("\tmovq   %rax, %rcx\n");
+                    write ("\t" ^ op ^ "    %rcx\n");
+                    write ("\tmovq   %rcx, " ^ var ^ "\n");
+                | false ->
+                    write ("\t" ^ op ^ "    %rax\n");
+                    write ("\tmovq   %rax, " ^ var ^ "\n");
+              end
+          | OP2 (bin_op, (_, expr1), (_, expr2)) ->
+              begin
+                match bin_op with
+                | S_INDEX ->
+                    begin
+                      match expr1 with
+                      | VAR str' ->
+                          let var = find_var env str' in
+                          compile_expr env expr2;
+                          write ("\tleal   " ^ var ^ ", rcx\n");
+                          write ("\tmovq   (%rcx, %rax, 8), %rax\n");
+                          write ("\tmovq   %rax, %rdx\n");
+                          write ("\t" ^ op ^ "    %rdx\n");
+                          write ("\tmovq   %rax, (%rcx, %rax, 8)\n");
+                          begin
+                            match post with
+                            | true -> write ("\tmovq   %rdx, (%rcx, %rax, 8)\n");
+                            | false -> ()
+                          end
+                      | _ -> failwith ("Error: in the expression a[i], a must be a variable")
+                    end
+                | _ -> failwith ("Error: cannot do " ^ op) 
+              end
+          | _ -> failwith ("Error: cannot do " ^ op)
+        end
 
   and compile_bin_op env op expr1 expr2 =
     match op with
@@ -299,8 +313,12 @@ let rec compile out decl_list =
           match expr1 with
           | VAR str ->
               let var = find_var env str in
-              write ("\tmovq   " ^ var ^  ", %rcx\n");
+              write ("\tleal   " ^ var ^  ", %rcx\n");
               write ("\tmovq   (%rcx, %rax, 8), %rax\n")
+
+          (* TODO *)
+
+          | OP2 (bin_op, (_, expr1), (_, expr2)) -> ()
           | _ -> failwith "Error: in the expression a[i], a must be a variable"
         end
     | _ ->
@@ -361,8 +379,10 @@ let rec compile out decl_list =
     env decl_list
     in
     let new_offset = (offset - env.current_offset) in
-    let _ = write ("\tsubq   $" ^ (string_of_int new_offset) ^ ", %rsp\n") in
-    env
+    if new_offset <> 0 then
+      let _ = write ("\tsubq   $" ^ (string_of_int new_offset) ^ ", %rsp\n") in
+      env
+    else env
   in
 
   let env = empty_env in
