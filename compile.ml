@@ -16,7 +16,8 @@ let after_global_dec =
    "\tmovq   %rsp, %rbp\n")
 
 let last_lines =
-  ("\tpopq   %rbp\n" ^
+  ("\tleave\n" ^
+  (*"\tpopq   %rbp\n" ^*)
    "\tret\n" ^
    "\t.size   main, .-main\n" ^
    "\t.ident  \"GCC: (Ubuntu 5.4.0-6ubuntu1~16.04.5) 5.4.0 20160609\"\n" ^
@@ -30,10 +31,10 @@ type env = {
   mutable current_offset : int;
 }
 
-let contain_global env str = 
+let contain_global env str =
   List.exists (fun name -> (compare name str) == 0) env.globals
 
-let find_local env str = 
+let find_local env str =
   try
     let entry = List.find (fun var -> let name, _ = var in
                           (compare name str) == 0)
@@ -43,7 +44,7 @@ let find_local env str =
   with
     Not_found -> None
 
-let find_var env str = 
+let find_var env str =
   match find_local env str with
   | None ->
       if contain_global env str
@@ -52,7 +53,7 @@ let find_var env str =
   | Some offset ->
       ((string_of_int offset) ^ "(%rbp)")
 
-let find_string env str = 
+let find_string env str =
   try
     let entry = List.find (fun var -> let name, label = var in
                           (compare name str) == 0)
@@ -60,17 +61,17 @@ let find_string env str =
     let _, label = entry in
     label
   with
-    Not_found -> failwith ("Error: unknown string : " ^ str)  
+    Not_found -> failwith ("Error: unknown string : " ^ str)
 
 
-let empty_env = { locals = []; 
+let empty_env = { locals = [];
                   globals = [];
                   functions = [];
                   strings = [];
                   current_offset = (-8) }
 
 let new_env locs globs fcts strs offset =
-   { locals = locs; 
+   { locals = locs;
      globals = globs;
      functions = fcts;
      strings = strs;
@@ -79,17 +80,17 @@ let new_env locs globs fcts strs offset =
 let rec compile out decl_list =
   let write = Printf.fprintf out "%s" in
 
-  let print_env env = 
+  let print_env env =
     write ("\n\t--- ENV ---\n\tLOCALS:\n");
-    List.iter 
+    List.iter
     (fun loc_var -> let name, offset = loc_var in
-                    write ("\t" ^ name ^ " : " ^ (string_of_int offset) ^ "\n") 
-    ) 
+                    write ("\t" ^ name ^ " : " ^ (string_of_int offset) ^ "\n")
+    )
     env.locals;
     write ("\tGLOBALS:\n");
     List.iter (fun name -> write ("\t" ^ name ^ "\n")) env.globals;
     write "\tFUNCTIONS:\n";
-    List.iter 
+    List.iter
     (fun fct -> let name, addr = fct in
                 write ("\t" ^ name ^ " : " ^ (string_of_int addr) ^ "\n")
     )
@@ -98,7 +99,7 @@ let rec compile out decl_list =
   in
 
   let rec compile_string_decl env decl_list =
-    let rec compile_string_decl_expr env expr = 
+    let rec compile_string_decl_expr env expr =
       match expr with
       | VAR _
       | CST _ -> env
@@ -121,7 +122,7 @@ let rec compile out decl_list =
           let env = compile_string_decl_expr env expr2 in
           compile_string_decl_expr env expr3
       | CALL (_, expr_list)
-      | ESEQ expr_list -> 
+      | ESEQ expr_list ->
           let expr_list = List.map
                           (fun loc_expr -> let _, expr = loc_expr in expr)
                           expr_list in
@@ -129,15 +130,15 @@ let rec compile out decl_list =
     in
     let rec compile_string_decl_code env code =
       match code with
-      | CBLOCK (_, code_list) -> 
+      | CBLOCK (_, code_list) ->
           let code_list = List.map (fun loc_code -> let _, code = loc_code in code) code_list in
-          List.fold_left (fun env code -> compile_string_decl_code env code) env code_list 
+          List.fold_left (fun env code -> compile_string_decl_code env code) env code_list
       | CEXPR (_, expr) ->
           compile_string_decl_expr env expr
       | CIF ((_, expr), (_, code1), (_, code2)) ->
           let env = compile_string_decl_expr env expr in
           let env = compile_string_decl_code env code1 in
-          compile_string_decl_code env code2  
+          compile_string_decl_code env code2
       | CWHILE ((_, expr), (_, code)) ->
           let env = compile_string_decl_expr env expr in
           compile_string_decl_code env code
@@ -147,7 +148,7 @@ let rec compile out decl_list =
           | Some (_, expr) -> compile_string_decl_expr env expr
 
     in
-    let compile_string_decl_var_dec env var_dec = 
+    let compile_string_decl_var_dec env var_dec =
       match var_dec with
       | CDECL (_, _) -> env
       | CFUN (_, _, fun_var_dec_list, (_, code)) ->
@@ -167,8 +168,8 @@ let rec compile out decl_list =
           env
         else if not is_main then
           let _ = env.locals <- ((str, env.current_offset) :: env.locals) in
-          let _ = write ("\tmovq   $0, " ^ (string_of_int env.current_offset) ^ "(%rbp)\n") in
-          let _ = env.current_offset <- (env.current_offset - 8) in 
+         (* let _ = write ("\tmovq   $0, " ^ (string_of_int env.current_offset) ^ "(%rbp)\n") in*)
+          let _ = env.current_offset <- (env.current_offset - 8) in
           env
         else env
     | CFUN (_, str, fun_var_dec_list, (_, code)) ->
@@ -176,14 +177,14 @@ let rec compile out decl_list =
         let env = compile_decl_list env fun_var_dec_list in
         let _ = compile_code env code in env
 
-  and compile_code env code = 
+  and compile_code env code =
     match code with
     | CBLOCK (var_dec_list, code_list) ->
         let code_list = List.map (fun loc_code -> let _, code = loc_code in code) code_list in
         let local_env = new_env env.locals env.globals env.functions env.strings env.current_offset in
         let local_env = compile_decl_list local_env var_dec_list in
         List.iter (compile_code local_env) code_list
-    | CEXPR (_, expr) -> 
+    | CEXPR (_, expr) ->
         compile_expr env expr
     | CIF ((_, expr), (_, code1), (_, code2)) ->
         compile_expr env expr;
@@ -236,7 +237,7 @@ let rec compile out decl_list =
               let var = find_var env str in
               write ("\tmovq   " ^ var ^  ", %rcx\n");
               write ("\tmovq   %rax, (%rcx, %rax, 8)\n");
-          | _ -> failwith "Error: in the affectation a[i]=e, a must be a variable" 
+          | _ -> failwith "Error: in the affectation a[i]=e, a must be a variable"
         end
     | CALL (str, expr_list) -> ()
     | OP1 (mon_op, (_, expr)) ->
@@ -258,26 +259,40 @@ let rec compile out decl_list =
     match op with
     | M_MINUS -> write "\tneg   %rax\n"
     | M_NOT -> write "\tnot   %rax\n"
-    | M_POST_INC -> write "\tinc   %rax\n"
+    | M_POST_INC
     | M_POST_DEC ->
-      write "\tdec   %rax\n";
-      let post_op = 
+      let post_op =
         (match op with
          | M_POST_INC -> "inc"
          | M_POST_DEC -> "dec"
          | _ -> "") in
-      begin 
+      begin
       match expr with
       | VAR str ->
-     
-          ()
-      | _ -> failwith "Error: cannot do ++"
+          let var = find_var env str in
+          write ("\tmovq   %rax, %rcx\n");
+          write ("\t" ^ post_op ^ "    %rcx\n");
+          write ("\tmovq   %rcx, " ^ var ^ "\n");
+      | _ -> failwith ("Error: cannot do " ^ post_op)
       end
-    | M_PRE_INC -> ()
-    | M_PRE_DEC -> ()
+    | M_PRE_INC
+    | M_PRE_DEC ->
+      let pre_op =
+        (match op with
+         | M_PRE_INC -> "inc"
+         | M_PRE_DEC -> "dec"
+         | _ -> "") in
+      begin
+      match expr with
+      | VAR str ->
+          let var = find_var env str in
+          write ("\t" ^ pre_op ^ "    %rax\n");
+          write ("\tmovq   %rax, " ^ var ^ "\n");
+      | _ -> failwith ("Error: cannot do " ^ pre_op)
+      end
 
   and compile_bin_op env op expr1 expr2 =
-    match op with 
+    match op with
     | S_INDEX ->
         compile_expr env expr2;
         begin
@@ -314,8 +329,8 @@ let rec compile out decl_list =
     compile_expr env expr2;
     write "\tpopq   %rcx\n";
     let asm_op = (match op with
-    | C_LT -> "jl"
-    | C_LE -> "jle"
+    | C_LT -> "jle"
+    | C_LE -> "jl"
     | C_EQ -> "je") in
     let label_true = genlab "true" in
     let label_next = genlab "next" in
@@ -339,9 +354,15 @@ let rec compile out decl_list =
     write (label_next ^ ":\n");
 
 
-  and compile_decl_list env = List.fold_left
-                        (fun env var_dec -> compile_var_dec env var_dec false false)
-                        env
+  and compile_decl_list env decl_list =
+    let offset = env.current_offset in
+    let _ = List.fold_left
+    (fun env var_dec -> compile_var_dec env var_dec false false)
+    env decl_list
+    in
+    let new_offset = (offset - env.current_offset) in
+    let _ = write ("\tsubq   $" ^ (string_of_int new_offset) ^ ", %rsp\n") in
+    env
   in
 
   let env = empty_env in
@@ -350,15 +371,15 @@ let rec compile out decl_list =
 
   let env = compile_string_decl env decl_list in
 
-  let env = List.fold_left 
+  let env = List.fold_left
             (fun env var_dec -> compile_var_dec env var_dec true false)
             env decl_list in
-  
+
   write after_global_dec;
 
   let _ = List.fold_left
           (fun env var_dec -> compile_var_dec env var_dec false true)
           env decl_list in
   (* print_env env; *)
-  
+
   write last_lines;
