@@ -1,25 +1,6 @@
 open Cparse
 open Genlab
 
-let first_lines =
-  ("\t.file   \"test.c\"\n" ^
-   "\t.section    .rodata\n" )
-
-let after_global_dec =
-  ("\t.text\n" ^
-   "\t.globl  main\n" ^
-   "\t.type   main, @function\n" ^
-   "main:\n" ^
-   "\tpushq   %rbp\n" ^
-   "\tmovq   %rsp, %rbp\n")
-
-let last_lines =
-  ("\tleave\n" ^
-   "\tret\n" ^
-   "\t.size   main, .-main\n" ^
-   "\t.ident  \"GCC: (Ubuntu 5.4.0-6ubuntu1~16.04.5) 5.4.0 20160609\"\n" ^
-   "\t.section         .note.GNU-stack,\"\",@progbits\n")
-
 type env = {
   mutable locals : (string * int) list;
   mutable globals : string list;
@@ -155,23 +136,61 @@ let rec compile out decl_list =
     List.fold_left (fun env var_dec -> compile_string_decl_var_dec env var_dec) env decl_list
   in
 
+  let compile_globals_var_decs env decl_list =
+    let compile_global_var_dec env var_dec =
+      match var_dec with
+      | CDECL (_, str) ->
+        let _ = env.globals <- (str :: env.globals) in
+        let _ = write ("\t.comm   " ^ str ^ ",8,8\n") in
+        env
+      | _ -> env
+    in
+    List.fold_left (fun env var_dec -> compile_global_var_dec env var_dec) env decl_list
+  in
 
-  let rec compile_var_dec env var_dec is_global is_main =
+  let rec compile_functions_decs env decl_list =
+    let compile_function_dec env var_dec =
+      match var_dec with
+      | CDECL (_, str) -> env
+      | CFUN (_, str, fun_var_dec_list, (_, code)) ->
+          write ("\t.text\n");
+          write ("\t.globl " ^ str ^ "\n");
+          write ("\t.type " ^ str ^ ", @function\n");
+          write (str ^ ":\n");
+          write ("\tpushq   %rbp\n");
+          write ("\tmovq   %rsp, %rbp\n");
+          let env = compile_decl_list env fun_var_dec_list in
+          let _ = compile_code env code in
+          write ("\tleave\n");
+          write ("\tret\n");
+          write ("\t.size   " ^ str ^ ", .-" ^ str ^ "\n");
+          env
+    in
+    List.fold_left (fun env var_dec ->
+                      let env = new_env [] env.globals env.functions env.strings (-8) in
+                      compile_function_dec env var_dec)
+    env decl_list
+
+  and compile_decl_list env decl_list =
+    let offset = env.current_offset in
+    let _ = List.fold_left
+    (fun env var_dec -> compile_var_dec env var_dec)
+    env decl_list
+    in
+    let new_offset = (offset - env.current_offset) in
+    if new_offset <> 0 then
+      let _ = write ("\tsubq   $" ^ (string_of_int new_offset) ^ ", %rsp\n") in
+      env
+    else env
+
+  and compile_var_dec env var_dec =
     match var_dec with
     | CDECL (_, str) ->
-        if is_global then
-          let _ = env.globals <- (str :: env.globals) in
-          let _ = write ("\t.comm   " ^ str ^ ",8,8\n") in
-          env
-        else if not is_main then
-          let _ = env.locals <- ((str, env.current_offset) :: env.locals) in
-          let _ = env.current_offset <- (env.current_offset - 8) in
-          env
-        else env
+        let _ = env.locals <- ((str, env.current_offset) :: env.locals) in
+        let _ = env.current_offset <- (env.current_offset - 8) in
+        env
     | CFUN (_, str, fun_var_dec_list, (_, code)) ->
-        if is_global then env else
-        let env = compile_decl_list env fun_var_dec_list in
-        let _ = compile_code env code in env
+        env
 
   and compile_code env code =
     match code with
@@ -231,7 +250,7 @@ let rec compile out decl_list =
         compile_expr env expr2;
         write "\tpopq   %rcx\n";
         let var = find_var env str in
-        write ("\tleal   " ^ var ^  ", %rdx\n");
+        write ("\tleaq   " ^ var ^  ", %rdx\n");
         write ("\tmovq   %rax, (%rdx, %rcx, 8)\n");
     | CALL (str, expr_list) -> ()
     | OP1 (mon_op, (_, expr)) ->
@@ -250,7 +269,7 @@ let rec compile out decl_list =
 
   and compile_mon_op env op expr =
     match op with
-    | M_MINUS -> 
+    | M_MINUS ->
         compile_expr env expr;
         write "\tneg   %rax\n"
     | M_NOT ->
@@ -288,19 +307,19 @@ let rec compile out decl_list =
                       | VAR str' ->
                           let var = find_var env str' in
                           compile_expr env expr2;
-                          write ("\tleal   " ^ var ^ ", rcx\n");
-                          write ("\tmovq   (%rcx, %rax, 8), %rax\n");
-                          write ("\tmovq   %rax, %rdx\n");
+                          write ("\tleaq   " ^ var ^ ", %rcx\n");
+                          write ("\tmovq   (%rcx, %rax, 8), %rdx\n");
+                          write ("\tmovq   %rdx, %rbx\n");
                           write ("\t" ^ op ^ "    %rdx\n");
-                          write ("\tmovq   %rax, (%rcx, %rax, 8)\n");
+                          write ("\tmovq   %rdx, (%rcx, %rax, 8)\n");
                           begin
                             match post with
-                            | true -> write ("\tmovq   %rdx, (%rcx, %rax, 8)\n");
-                            | false -> ()
+                            | false -> write ("\tmovq   %rdx, %rax\n");
+                            | true -> write ("\tmovq   %rbx, %rax\n");
                           end
                       | _ -> failwith ("Error: in the expression a[i], a must be a variable")
                     end
-                | _ -> failwith ("Error: cannot do " ^ op) 
+                | _ -> failwith ("Error: cannot do " ^ op)
               end
           | _ -> failwith ("Error: cannot do " ^ op)
         end
@@ -313,7 +332,7 @@ let rec compile out decl_list =
           | VAR str ->
               let var = find_var env str in
               compile_expr env expr2;
-              write ("\tleal   " ^ var ^  ", %rcx\n");
+              write ("\tleaq   " ^ var ^  ", %rcx\n");
               write ("\tmovq   (%rcx, %rax, 8), %rax\n")
           | OP2 (bin_op, (_, expr1'), (_, expr2')) as expr' ->
               begin
@@ -323,11 +342,11 @@ let rec compile out decl_list =
                     write ("\tpushq   %rax\n");
                     compile_expr env expr';
                     write ("\tpopq   %rcx\n");
-                    write ("\tleal   %rax, %rdx\n");
+                    write ("\tleaq   %rax, %rdx\n");
                     write ("\tmovq   (%rdx, %rcx, 8), %rax\n")
-                | _ -> failwith "Error: in the expression a[i1]...[in], a must be a variable" 
+                | _ -> failwith "Error: in the expression a[i1]...[in], a must be a variable"
               end
-          | _ -> failwith "Error: in the expression a[i], a must be a variable"
+          | _ -> failwith "Error: in the expression a[i], a must be a variable !"
         end
     | _ ->
         compile_expr env expr1;
@@ -379,35 +398,19 @@ let rec compile out decl_list =
     compile_expr env expr2;
     write (label_next ^ ":\n");
 
-
-  and compile_decl_list env decl_list =
-    let offset = env.current_offset in
-    let _ = List.fold_left
-    (fun env var_dec -> compile_var_dec env var_dec false false)
-    env decl_list
-    in
-    let new_offset = (offset - env.current_offset) in
-    if new_offset <> 0 then
-      let _ = write ("\tsubq   $" ^ (string_of_int new_offset) ^ ", %rsp\n") in
-      env
-    else env
   in
 
   let env = empty_env in
 
-  write first_lines;
+  write ("\t.file   \"test.c\"\n");
+
+  let env = compile_globals_var_decs env decl_list in
+
+  write ("\t.section    .rodata\n");
 
   let env = compile_string_decl env decl_list in
 
-  let env = List.fold_left
-            (fun env var_dec -> compile_var_dec env var_dec true false)
-            env decl_list in
+  let _ = compile_functions_decs env decl_list in
 
-  write after_global_dec;
-
-  let _ = List.fold_left
-          (fun env var_dec -> compile_var_dec env var_dec false true)
-          env decl_list in
-  (* print_env env; *)
-
-  write last_lines;
+  write ("\t.ident  \"GCC: (Ubuntu 5.4.0-6ubuntu1~16.04.5) 5.4.0 20160609\"\n" ^
+         "\t.section         .note.GNU-stack,\"\",@progbits\n");
