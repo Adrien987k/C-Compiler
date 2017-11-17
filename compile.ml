@@ -308,17 +308,25 @@ let rec compile out decl_list =
   and compile_bin_op env op expr1 expr2 =
     match op with
     | S_INDEX ->
-        compile_expr env expr2;
         begin
           match expr1 with
           | VAR str ->
               let var = find_var env str in
+              compile_expr env expr2;
               write ("\tleal   " ^ var ^  ", %rcx\n");
               write ("\tmovq   (%rcx, %rax, 8), %rax\n")
-
-          (* TODO *)
-
-          | OP2 (bin_op, (_, expr1), (_, expr2)) -> ()
+          | OP2 (bin_op, (_, expr1'), (_, expr2')) as expr' ->
+              begin
+                match bin_op with
+                | S_INDEX ->
+                    compile_expr env expr2;
+                    write ("\tpushq   %rax\n");
+                    compile_expr env expr';
+                    write ("\tpopq   %rcx\n");
+                    write ("\tleal   %rax, %rdx\n");
+                    write ("\tmovq   (%rdx, %rcx, 8), %rax\n")
+                | _ -> failwith "Error: in the expression a[i1]...[in], a must be a variable" 
+              end
           | _ -> failwith "Error: in the expression a[i], a must be a variable"
         end
     | _ ->
