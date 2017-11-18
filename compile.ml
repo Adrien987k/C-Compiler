@@ -252,7 +252,27 @@ let rec compile out decl_list =
         let var = find_var env str in
         write ("\tleaq   " ^ var ^  ", %rdx\n");
         write ("\tmovq   %rax, (%rdx, %rcx, 8)\n");
-    | CALL (str, expr_list) -> ()
+    | CALL (str, expr_list) ->
+        let expr_list = List.map 
+                        (fun loc_expr -> let _, expr = loc_expr in expr)
+                        expr_list
+        in
+        let registers = ["%rdi"; "%rsi"; "%rdx"; "%rcx"; "%r8"; "%r9"] in
+        List.iteri 
+        (fun i expr -> 
+          compile_expr env expr;
+          if i < 6 then
+            write ("\tmovq   %rax, " ^ (List.nth registers i) ^ "\n")
+          else
+            write ("\tpushq   %rax\n")
+        )
+        expr_list;
+        write ("\tmovq   $0, %rax\n");
+        write ("\tpushq   %r10\n");
+        write ("\tpushq   %r11\n");
+        write ("\tcall   " ^ str ^ "\n");
+        write ("\tpopq   %r10\n");
+        write ("\tpopq   %r11\n");
     | OP1 (mon_op, (_, expr)) ->
         compile_mon_op env mon_op expr
     | OP2 (bin_op, (_, expr1), (_, expr2)) ->
