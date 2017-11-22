@@ -4,7 +4,7 @@ open Genlab
 type env = {
   mutable locals : (string * int) list;
   mutable globals : string list;
-  mutable functions : (string * int) list;
+  mutable functions : string list;
   mutable strings : (string * string) list;
   mutable current_offset : int;
 }
@@ -27,7 +27,7 @@ let find_var env str =
   | None ->
       if contain_global env str
       then (str ^ "(%rip)")
-      else failwith ("Error: unbound value " ^ str)
+      else str
   | Some offset ->
       ((string_of_int offset) ^ "(%rbp)")
 
@@ -41,6 +41,8 @@ let find_string env str =
   with
     Not_found -> failwith ("Error: unknown string : " ^ str)
 
+let find_function env fct =
+  List.exists (fun str -> (String.compare str fct = 0)) env.functions
 
 let empty_env = { locals = [];
                   globals = [];
@@ -58,24 +60,6 @@ let new_env locs globs fcts strs offset =
 let rec compile out decl_list =
   let write = Printf.fprintf out "%s" in
 
-  let print_env env =
-    write ("\n\t--- ENV ---\n\tLOCALS:\n");
-    List.iter
-    (fun loc_var -> let name, offset = loc_var in
-                    write ("\t" ^ name ^ " : " ^ (string_of_int offset) ^ "\n")
-    )
-    env.locals;
-    write ("\tGLOBALS:\n");
-    List.iter (fun name -> write ("\t" ^ name ^ "\n")) env.globals;
-    write "\tFUNCTIONS:\n";
-    List.iter
-    (fun fct -> let name, addr = fct in
-                write ("\t" ^ name ^ " : " ^ (string_of_int addr) ^ "\n")
-    )
-    env.functions;
-    write "\t--- END OF ENV ---\n\n";
-  in
-
   let rec compile_string_decl env decl_list =
     let rec compile_string_decl_expr env expr =
       match expr with
@@ -85,6 +69,7 @@ let rec compile out decl_list =
           let str_label = genlab "LC" in
           env.strings <- ((str, str_label) :: env.strings);
           write (str_label ^ ":\n");
+          let str = String.escaped str in
           write ("\t.string \"" ^ str ^ "\"\n");
           env
       | SET_VAR (_, (_, expr1))
@@ -153,6 +138,7 @@ let rec compile out decl_list =
       match var_dec with
       | CDECL (_, str) -> env
       | CFUN (_, str, fun_var_dec_list, (_, code)) ->
+          env.functions <- (str :: env.functions);
           write ("\t.text\n");
           write ("\t.globl " ^ str ^ "\n");
           write ("\t.type " ^ str ^ ", @function\n");
@@ -160,6 +146,14 @@ let rec compile out decl_list =
           write ("\tpushq   %rbp\n");
           write ("\tmovq   %rsp, %rbp\n");
           let env = compile_decl_list env fun_var_dec_list in
+          let nb_args = List.length fun_var_dec_list in
+          let registers = ["%rdi"; "%rsi"; "%rdx"; "%rcx"; "%r8"; "%r9"] in
+          let _ = List.iteri (fun i reg ->
+              if i < 6 && i < nb_args then
+                write ("\tmovq   " ^ reg ^ ", " ^ (string_of_int ((i * (-8)) - 8)) ^ "(%rbp)\n");
+              if i >= 6 && i < nb_args then
+                write ("\tpopq   " ^  (string_of_int ((i * (-8)) - 8)) ^ "(%rbp)\n");
+          ) registers in
           let _ = compile_code env code in
           write ("\tleave\n");
           write ("\tret\n");
@@ -250,19 +244,25 @@ let rec compile out decl_list =
         compile_expr env expr2;
         write "\tpopq   %rcx\n";
         let var = find_var env str in
-        write ("\tleaq   " ^ var ^  ", %rdx\n");
+        write ("\tmovq   " ^ var ^  ", %rdx\n");
         write ("\tmovq   %rax, (%rdx, %rcx, 8)\n");
     | CALL (str, expr_list) ->
-        let expr_list = List.map 
+        let expr_list = List.map
                         (fun loc_expr -> let _, expr = loc_expr in expr)
                         expr_list
         in
         let registers = ["%rdi"; "%rsi"; "%rdx"; "%rcx"; "%r8"; "%r9"] in
-        List.iteri 
-        (fun i expr -> 
+        let expr_list = List.rev expr_list in
+        List.iter
+        (fun expr ->
           compile_expr env expr;
+          write ("\tpushq   %rax\n");
+        )
+        expr_list;
+        List.iteri
+        (fun i expr ->
           if i < 6 then
-            write ("\tmovq   %rax, " ^ (List.nth registers i) ^ "\n")
+            write ("\tpopq   " ^ (List.nth registers i) ^ "\n")
           else
             write ("\tpushq   %rax\n")
         )
@@ -271,8 +271,15 @@ let rec compile out decl_list =
         write ("\tpushq   %r10\n");
         write ("\tpushq   %r11\n");
         write ("\tcall   " ^ str ^ "\n");
-        write ("\tpopq   %r10\n");
+
+        let other_funct = ["fopen"; "malloc"; "calloc"; "realloc"; "exit"] in
+        let must_align =
+          (not (List.exists (fun fct -> (String.compare fct str) = 0) other_funct))
+          && not (find_function env str) in
+        let _ = (if must_align then write "\tcltq\n") in
+
         write ("\tpopq   %r11\n");
+        write ("\tpopq   %r10\n");
     | OP1 (mon_op, (_, expr)) ->
         compile_mon_op env mon_op expr
     | OP2 (bin_op, (_, expr1), (_, expr2)) ->
@@ -327,7 +334,7 @@ let rec compile out decl_list =
                       | VAR str' ->
                           let var = find_var env str' in
                           compile_expr env expr2;
-                          write ("\tleaq   " ^ var ^ ", %rcx\n");
+                          write ("\tmovq   " ^ var ^ ", %rcx\n");
                           write ("\tmovq   (%rcx, %rax, 8), %rdx\n");
                           write ("\tmovq   %rdx, %rbx\n");
                           write ("\t" ^ op ^ "    %rdx\n");
@@ -352,7 +359,7 @@ let rec compile out decl_list =
           | VAR str ->
               let var = find_var env str in
               compile_expr env expr2;
-              write ("\tleaq   " ^ var ^  ", %rcx\n");
+              write ("\tmovq   " ^ var ^  ", %rcx\n");
               write ("\tmovq   (%rcx, %rax, 8), %rax\n")
           | OP2 (bin_op, (_, expr1'), (_, expr2')) as expr' ->
               begin
@@ -362,16 +369,16 @@ let rec compile out decl_list =
                     write ("\tpushq   %rax\n");
                     compile_expr env expr';
                     write ("\tpopq   %rcx\n");
-                    write ("\tleaq   %rax, %rdx\n");
+                    write ("\tmovq   %rax, %rdx\n");
                     write ("\tmovq   (%rdx, %rcx, 8), %rax\n")
                 | _ -> failwith "Error: in the expression a[i1]...[in], a must be a variable"
               end
           | _ -> failwith "Error: in the expression a[i], a must be a variable !"
         end
     | _ ->
-        compile_expr env expr1;
-        write "\tpushq   %rax\n";
         compile_expr env expr2;
+        write "\tpushq   %rax\n";
+        compile_expr env expr1;
         write "\tpopq   %rcx\n";
         begin
           match op with
@@ -389,9 +396,9 @@ let rec compile out decl_list =
         end
 
   and compile_cmp_op env op expr1 expr2 =
-    compile_expr env expr1;
-    write "\tpushq   %rax\n";
     compile_expr env expr2;
+    write "\tpushq   %rax\n";
+    compile_expr env expr1;
     write "\tpopq   %rcx\n";
     let asm_op = (match op with
     | C_LT -> "jle"
@@ -399,7 +406,7 @@ let rec compile out decl_list =
     | C_EQ -> "je") in
     let label_true = genlab "true" in
     let label_next = genlab "next" in
-    write "\tcmpq   %rcx, %rax\n";
+    write "\tcmpq   %rax, %rcx\n";
     write ("\t" ^ asm_op ^ " " ^ label_true ^ "\n");
     write ("\tmovq   $1, %rax\n");
     write ("\tjmp " ^ label_next ^ "\n");
