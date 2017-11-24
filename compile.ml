@@ -41,6 +41,11 @@ let find_string env str =
   with
     Not_found -> failwith ("Error: unknown string : " ^ str)
 
+let exist_string env str =
+  List.exists (fun str_lab ->
+      let str', _ = str_lab in
+      (String.compare str str' = 0)) env.strings
+
 let find_function env fct =
   List.exists (fun str -> (String.compare str fct = 0)) env.functions
 
@@ -66,12 +71,16 @@ let rec compile out decl_list =
       | VAR _
       | CST _ -> env
       | STRING str ->
-          let str_label = genlab "LC" in
-          env.strings <- ((str, str_label) :: env.strings);
-          write (str_label ^ ":\n");
-          let str = String.escaped str in
-          write ("\t.string \"" ^ str ^ "\"\n");
-          env
+          if not (exist_string env str) then
+            begin
+              let str_label = genlab "LC" in
+              env.strings <- ((str, str_label) :: env.strings);
+              write (str_label ^ ":\n");
+              let str = String.escaped str in
+              write ("\t.string \"" ^ str ^ "\"\n");
+              env
+            end
+          else env
       | SET_VAR (_, (_, expr1))
       | OP1 (_, (_, expr1)) ->
           compile_string_decl_expr env expr1
@@ -148,12 +157,15 @@ let rec compile out decl_list =
           let env = compile_decl_list env fun_var_dec_list in
           let nb_args = List.length fun_var_dec_list in
           let registers = ["%rdi"; "%rsi"; "%rdx"; "%rcx"; "%r8"; "%r9"] in
-          let _ = List.iteri (fun i reg ->
+          let _ = List.iteri (fun i var_dec ->
               if i < 6 && i < nb_args then
-                write ("\tmovq   " ^ reg ^ ", " ^ (string_of_int ((i * (-8)) - 8)) ^ "(%rbp)\n");
+                write ("\tmovq   " ^ (List.nth registers i) ^ ", " ^ (string_of_int ((i * (-8)) - 8)) ^ "(%rbp)\n");
               if i >= 6 && i < nb_args then
-                write ("\tpopq   " ^  (string_of_int ((i * (-8)) - 8)) ^ "(%rbp)\n");
-          ) registers in
+                begin
+                  write ("\tmovq   " ^ (string_of_int (((i - 5) * 8) + 8)) ^  "(%rbp), %r10\n");
+                  write ("\tmovq   %r10, " ^  (string_of_int ((i * (-8)) - 8)) ^ "(%rbp)\n")
+                end
+          ) fun_var_dec_list in
           let _ = compile_code env code in
           write ("\tleave\n");
           write ("\tret\n");
@@ -218,11 +230,15 @@ let rec compile out decl_list =
         write ("\tjmp   " ^ while_label ^ "\n");
         write (next_label ^ ":\n");
     | CRETURN expr_opt ->
-      match expr_opt with
-      | None ->
-          write "\tmovq   $0, %rax\n"
-      | Some (_, expr) ->
-          compile_expr env expr
+        match expr_opt with
+        | None ->
+            write "\tmovq   $0, %rax\n";
+            write ("\tleave\n");
+            write ("\tret\n")
+        | Some (_, expr) ->
+            compile_expr env expr;
+            write ("\tleave\n");
+            write ("\tret\n")
 
   and compile_expr env expr =
     match expr with
@@ -239,13 +255,13 @@ let rec compile out decl_list =
         let var = find_var env str in
         write ("\tmovq   %rax, " ^ var ^ "\n")
     | SET_ARRAY (str, (_, expr1), (_, expr2)) ->
-        compile_expr env expr1;
-        write "\tpushq   %rax\n";
         compile_expr env expr2;
+        write "\tpushq   %rax\n";
+        compile_expr env expr1;
         write "\tpopq   %rcx\n";
         let var = find_var env str in
         write ("\tmovq   " ^ var ^  ", %rdx\n");
-        write ("\tmovq   %rax, (%rdx, %rcx, 8)\n");
+        write ("\tmovq   %rcx, (%rdx, %rax, 8)\n");
     | CALL (str, expr_list) ->
         let expr_list = List.map
                         (fun loc_expr -> let _, expr = loc_expr in expr)
@@ -263,23 +279,15 @@ let rec compile out decl_list =
         (fun i expr ->
           if i < 6 then
             write ("\tpopq   " ^ (List.nth registers i) ^ "\n")
-          else
-            write ("\tpushq   %rax\n")
         )
         expr_list;
         write ("\tmovq   $0, %rax\n");
-        write ("\tpushq   %r10\n");
-        write ("\tpushq   %r11\n");
         write ("\tcall   " ^ str ^ "\n");
-
-        let other_funct = ["fopen"; "malloc"; "calloc"; "realloc"; "exit"] in
+        let functs_64_bits = ["fopen"; "malloc"; "calloc"; "realloc"; "exit"] in
         let must_align =
-          (not (List.exists (fun fct -> (String.compare fct str) = 0) other_funct))
+          (not (List.exists (fun fct -> (String.compare fct str) = 0) functs_64_bits))
           && not (find_function env str) in
-        let _ = (if must_align then write "\tcltq\n") in
-
-        write ("\tpopq   %r11\n");
-        write ("\tpopq   %r10\n");
+        let _ = (if must_align then write "\tcltq\n") in ()
     | OP1 (mon_op, (_, expr)) ->
         compile_mon_op env mon_op expr
     | OP2 (bin_op, (_, expr1), (_, expr2)) ->
@@ -384,10 +392,10 @@ let rec compile out decl_list =
           match op with
           | S_MUL -> write "\timulq   %rcx, %rax\n"
           | S_DIV ->
-              write "\tmovq   $0, %rdx\n";
+              write "\tcqto\n";
               write "\tidivq   %rcx\n"
           | S_MOD ->
-              write "\tmovq   $0, %rdx\n";
+              write "\tcqto\n";
               write "\tidivq   %rcx\n";
               write "\tmovq   %rdx, %rax\n"
           | S_ADD -> write "\taddq   %rcx, %rax\n"
@@ -401,43 +409,34 @@ let rec compile out decl_list =
     compile_expr env expr1;
     write "\tpopq   %rcx\n";
     let asm_op = (match op with
-    | C_LT -> "jle"
-    | C_LE -> "jl"
+    | C_LT -> "jl"
+    | C_LE -> "jle"
     | C_EQ -> "je") in
     let label_true = genlab "true" in
     let label_next = genlab "next" in
-    write "\tcmpq   %rax, %rcx\n";
+    write "\tcmpq   %rcx, %rax\n";
     write ("\t" ^ asm_op ^ " " ^ label_true ^ "\n");
-    write ("\tmovq   $1, %rax\n");
+    write ("\tmovq   $0, %rax\n");
     write ("\tjmp " ^ label_next ^ "\n");
-    write (label_true ^ ":\n\tmovq   $0, %rax\n");
+    write (label_true ^ ":\n\tmovq   $1, %rax\n");
     write (label_next ^ ": \n");
 
   and compile_eif env expr1 expr2 expr3 =
     compile_expr env expr1;
-    let label_true = genlab "true" in
+    let label_false = genlab "false" in
     let label_next = genlab "next" in
     write ("\tcmpq   $0, %rax\n");
-    write ("\tje " ^ label_true ^ "\n");
-    compile_expr env expr3;
-    write ("\tjmp " ^ label_next ^ "\n");
-    write (label_true ^ ":\n");
+    write ("\tje " ^ label_false ^ "\n");
     compile_expr env expr2;
+    write ("\tjmp " ^ label_next ^ "\n");
+    write (label_false ^ ":\n");
+    compile_expr env expr3;
     write (label_next ^ ":\n");
 
   in
-
   let env = empty_env in
-
   write ("\t.file   \"test.c\"\n");
-
   let env = compile_globals_var_decs env decl_list in
-
   write ("\t.section    .rodata\n");
-
   let env = compile_string_decl env decl_list in
-
-  let _ = compile_functions_decs env decl_list in
-
-  write ("\t.ident  \"GCC: (Ubuntu 5.4.0-6ubuntu1~16.04.5) 5.4.0 20160609\"\n" ^
-         "\t.section         .note.GNU-stack,\"\",@progbits\n");
+  let _ = compile_functions_decs env decl_list in ()
