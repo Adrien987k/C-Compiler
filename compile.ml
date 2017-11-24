@@ -2,17 +2,20 @@ open Cparse
 open Genlab
 
 type env = {
-  mutable locals : (string * int) list;
+  mutable locals : (string * int) list ;      (* Locals variables with their offset from rbp *)
   mutable globals : string list;
   mutable functions : string list;
-  mutable strings : (string * string) list;
-  mutable current_offset : int;
+  mutable strings : (string * string) list;   (* The string with its label *)
+  mutable current_offset : int;               (* Current offset from rbp,
+                                                 used to allocate memory for new local variables *)
 }
 
 let contain_global env str =
   List.exists (fun name -> (compare name str) == 0) env.globals
 
-let find_local env str =
+(* Find a local or a global variable, return the string to instert in the code *)
+let find_var env str =
+  let find_local env str =
   try
     let entry = List.find (fun var -> let name, _ = var in
                           (compare name str) == 0)
@@ -21,8 +24,7 @@ let find_local env str =
     Some offset
   with
     Not_found -> None
-
-let find_var env str =
+  in
   match find_local env str with
   | None ->
       if contain_global env str
@@ -31,6 +33,7 @@ let find_var env str =
   | Some offset ->
       ((string_of_int offset) ^ "(%rbp)")
 
+(* Return the label of a string *)
 let find_string env str =
   try
     let entry = List.find (fun var -> let name, label = var in
@@ -41,6 +44,7 @@ let find_string env str =
   with
     Not_found -> failwith ("Error: unknown string : " ^ str)
 
+(* Return if the string [str] is in the environment [env] *)
 let exist_string env str =
   List.exists (fun str_lab ->
       let str', _ = str_lab in
@@ -55,6 +59,7 @@ let empty_env = { locals = [];
                   strings = [];
                   current_offset = (-8) }
 
+(* Create and return copy of [env] *)
 let new_env locs globs fcts strs offset =
    { locals = locs;
      globals = globs;
@@ -64,7 +69,7 @@ let new_env locs globs fcts strs offset =
 
 let rec compile out decl_list =
   let write = Printf.fprintf out "%s" in
-
+  (* Search and declare all the strings declarations in the syntax tree *)
   let rec compile_string_decl env decl_list =
     let rec compile_string_decl_expr env expr =
       match expr with
@@ -118,7 +123,6 @@ let rec compile out decl_list =
           match expr_opt with
           | None -> env
           | Some (_, expr) -> compile_string_decl_expr env expr
-
     in
     let compile_string_decl_var_dec env var_dec =
       match var_dec with
@@ -130,54 +134,65 @@ let rec compile out decl_list =
     List.fold_left (fun env var_dec -> compile_string_decl_var_dec env var_dec) env decl_list
   in
 
+  (* Search and declare all globals variables *)
   let compile_globals_var_decs env decl_list =
     let compile_global_var_dec env var_dec =
       match var_dec with
       | CDECL (_, str) ->
-        let _ = env.globals <- (str :: env.globals) in
-        let _ = write ("\t.comm   " ^ str ^ ",8,8\n") in
-        env
+          let _ = env.globals <- (str :: env.globals) in
+          let _ = write ("\t.comm   " ^ str ^ ",8,8\n") in
+          env
       | _ -> env
     in
     List.fold_left (fun env var_dec -> compile_global_var_dec env var_dec) env decl_list
   in
 
+  (* Compile all functions *)
   let rec compile_functions_decs env decl_list =
     let compile_function_dec env var_dec =
       match var_dec with
       | CDECL (_, str) -> env
       | CFUN (_, str, fun_var_dec_list, (_, code)) ->
-          env.functions <- (str :: env.functions);
-          write ("\t.text\n");
-          write ("\t.globl " ^ str ^ "\n");
-          write ("\t.type " ^ str ^ ", @function\n");
-          write (str ^ ":\n");
-          write ("\tpushq   %rbp\n");
-          write ("\tmovq   %rsp, %rbp\n");
-          let env = compile_decl_list env fun_var_dec_list in
-          let nb_args = List.length fun_var_dec_list in
-          let registers = ["%rdi"; "%rsi"; "%rdx"; "%rcx"; "%r8"; "%r9"] in
-          let _ = List.iteri (fun i var_dec ->
-              if i < 6 && i < nb_args then
-                write ("\tmovq   " ^ (List.nth registers i) ^ ", " ^ (string_of_int ((i * (-8)) - 8)) ^ "(%rbp)\n");
-              if i >= 6 && i < nb_args then
-                begin
-                  write ("\tmovq   " ^ (string_of_int (((i - 5) * 8) + 8)) ^  "(%rbp), %r10\n");
-                  write ("\tmovq   %r10, " ^  (string_of_int ((i * (-8)) - 8)) ^ "(%rbp)\n")
-                end
-          ) fun_var_dec_list in
-          let _ = compile_code env code in
-          write ("\tleave\n");
-          write ("\tret\n");
-          write ("\t.size   " ^ str ^ ", .-" ^ str ^ "\n");
-          env
+          (* If the function has not been already declared *)
+          if not (find_function env str) then
+            begin
+              env.functions <- (str :: env.functions);
+              write ("\t.text\n");
+              write ("\t.globl " ^ str ^ "\n");
+              write ("\t.type " ^ str ^ ", @function\n");
+              write (str ^ ":\n");
+              write ("\tpushq   %rbp\n");
+              write ("\tmovq   %rsp, %rbp\n");
+              let env = compile_var_decl_list env fun_var_dec_list in
+              let nb_args = List.length fun_var_dec_list in
+              let registers = ["%rdi"; "%rsi"; "%rdx"; "%rcx"; "%r8"; "%r9"] in
+              (* Copy the arguments of the function in locals variables *)
+              let _ = List.iteri (fun i var_dec ->
+                  if i < 6 && i < nb_args then
+                    (* Put arguments at -8(%rbp), -16(%rbp)... *)
+                    write ("\tmovq   " ^ (List.nth registers i) ^ ", " ^ (string_of_int ((i * (-8)) - 8)) ^ "(%rbp)\n");
+                  if i >= 6 && i < nb_args then
+                    (* If there is more than 6 arguments, the rest are at 16(%rbp), 24(%rbp)... *)
+                    begin
+                      write ("\tmovq   " ^ (string_of_int (((i - 5) * 8) + 8)) ^  "(%rbp), %r10\n");
+                      write ("\tmovq   %r10, " ^  (string_of_int ((i * (-8)) - 8)) ^ "(%rbp)\n")
+                    end
+                ) fun_var_dec_list in
+              let _ = compile_code env code in
+              write ("\tleave\n");
+              write ("\tret\n");
+              write ("\t.size   " ^ str ^ ", .-" ^ str ^ "\n");
+              env
+            end
+          else failwith ("Error: function " ^ str ^ " is already defined")
     in
     List.fold_left (fun env var_dec ->
                       let env = new_env [] env.globals env.functions env.strings (-8) in
                       compile_function_dec env var_dec)
     env decl_list
 
-  and compile_decl_list env decl_list =
+  (* Compile a list of variable declarations *)
+  and compile_var_decl_list env decl_list =
     let offset = env.current_offset in
     let _ = List.fold_left
     (fun env var_dec -> compile_var_dec env var_dec)
@@ -189,6 +204,7 @@ let rec compile out decl_list =
       env
     else env
 
+  (* Compile a variable declaration *)
   and compile_var_dec env var_dec =
     match var_dec with
     | CDECL (_, str) ->
@@ -202,8 +218,9 @@ let rec compile out decl_list =
     match code with
     | CBLOCK (var_dec_list, code_list) ->
         let code_list = List.map (fun loc_code -> let _, code = loc_code in code) code_list in
+        (* Create a copy of the current environment *)
         let local_env = new_env env.locals env.globals env.functions env.strings env.current_offset in
-        let local_env = compile_decl_list local_env var_dec_list in
+        let local_env = compile_var_decl_list local_env var_dec_list in
         List.iter (compile_code local_env) code_list
     | CEXPR (_, expr) ->
         compile_expr env expr
@@ -268,13 +285,16 @@ let rec compile out decl_list =
                         expr_list
         in
         let registers = ["%rdi"; "%rsi"; "%rdx"; "%rcx"; "%r8"; "%r9"] in
+        (* Arguments must be evaluate from left to right *)
         let expr_list = List.rev expr_list in
+        (* Push all arguments on the stack *)
         List.iter
         (fun expr ->
           compile_expr env expr;
           write ("\tpushq   %rax\n");
         )
         expr_list;
+        (* Remove the 6 fisrt arguments of the stack and put them in the appropriate register  *)
         List.iteri
         (fun i expr ->
           if i < 6 then
@@ -284,6 +304,8 @@ let rec compile out decl_list =
         write ("\tmovq   $0, %rax\n");
         write ("\tcall   " ^ str ^ "\n");
         let functs_64_bits = ["fopen"; "malloc"; "calloc"; "realloc"; "exit"] in
+        (* Check if the function's result is 32 bits,
+           In that case, add the instruction 'cltq' in order to convert the result from 32 to 64 bits *)
         let must_align =
           (not (List.exists (fun fct -> (String.compare fct str) = 0) functs_64_bits))
           && not (find_function env str) in
@@ -349,8 +371,8 @@ let rec compile out decl_list =
                           write ("\tmovq   %rdx, (%rcx, %rax, 8)\n");
                           begin
                             match post with
-                            | false -> write ("\tmovq   %rdx, %rax\n");
-                            | true -> write ("\tmovq   %rbx, %rax\n");
+                            | false -> write ("\tmovq   %rdx, %rax\n"); (* ++a[i] or --a[i] *)
+                            | true -> write ("\tmovq   %rbx, %rax\n");  (* a[i]++ or a[i]-- *)
                           end
                       | _ -> failwith ("Error: in the expression a[i], a must be a variable")
                     end
@@ -384,6 +406,7 @@ let rec compile out decl_list =
           | _ -> failwith "Error: in the expression a[i], a must be a variable !"
         end
     | _ ->
+        (* Put expr1 in rax and expr2 in rcx *)
         compile_expr env expr2;
         write "\tpushq   %rax\n";
         compile_expr env expr1;
@@ -404,6 +427,7 @@ let rec compile out decl_list =
         end
 
   and compile_cmp_op env op expr1 expr2 =
+    (* Put expr1 in rax and expr2 in rcx *)
     compile_expr env expr2;
     write "\tpushq   %rax\n";
     compile_expr env expr1;
