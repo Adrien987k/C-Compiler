@@ -2,23 +2,23 @@ open Cparse
 open Genlab
 
 type env = {
-  mutable locals : (string * int) list ;      (* Locals variables with their offset from rbp *)
-  mutable globals : string list;
-  mutable functions : string list;
-  mutable strings : (string * string) list;   (* The string with its label *)
-  mutable current_offset : int;               (* Current offset from rbp,
+  locals : (string * int) list ;      (* Locals variables with their offset from rbp *)
+  globals : string list;
+  functions : string list;
+  strings : (string * string) list;   (* The string with its label *)
+  current_offset : int;               (* Current offset from rbp,
                                                  used to allocate memory for new local variables *)
 }
 
 let contain_global env str =
-  List.exists (fun name -> (compare name str) == 0) env.globals
+  List.exists (fun name -> (compare name str) = 0) env.globals
 
 (* Find a local or a global variable, return the string to instert in the code *)
 let find_var env str =
   let find_local env str =
   try
     let entry = List.find (fun var -> let name, _ = var in
-                          (compare name str) == 0)
+                          (compare name str) = 0)
                           env.locals in
     let _, offset = entry in
     Some offset
@@ -37,7 +37,7 @@ let find_var env str =
 let find_string env str =
   try
     let entry = List.find (fun var -> let name, label = var in
-                          (compare name str) == 0)
+                          (compare name str) = 0)
                           env.strings in
     let _, label = entry in
     label
@@ -69,6 +69,25 @@ let new_env locs globs fcts strs offset =
 
 let rec compile out decl_list =
   let write = Printf.fprintf out "%s" in
+
+  let print_env env =
+     write ("\n\t--- ENV ---\n\tLOCALS:\n");
+     List.iter
+     (fun loc_var -> let name, offset = loc_var in
+                     write ("\t" ^ name ^ " : " ^ (string_of_int offset) ^ "\n")
+     )
+     env.locals;
+     write ("\tGLOBALS:\n");
+     List.iter (fun name -> write ("\t" ^ name ^ "\n")) env.globals;
+     write "\tFUNCTIONS:\n";
+     List.iter
+     (fun fct -> write ("\t" ^ fct ^ "\n")
+     )
+     env.functions;
+     write ("\tCURRENT_OFFSET: " ^ (string_of_int env.current_offset) ^ "\n");
+     write "\t--- END OF ENV ---\n\n";
+   in
+
   (* Search and declare all the strings declarations in the syntax tree *)
   let rec compile_string_decl env decl_list =
     let rec compile_string_decl_expr env expr =
@@ -79,7 +98,8 @@ let rec compile out decl_list =
           if not (exist_string env str) then
             begin
               let str_label = genlab "LC" in
-              env.strings <- ((str, str_label) :: env.strings);
+              let strings = ((str, str_label) :: env.strings) in
+              let env = new_env env.locals env.globals env.functions strings env.current_offset in
               write (str_label ^ ":\n");
               let str = String.escaped str in
               write ("\t.string \"" ^ str ^ "\"\n");
@@ -120,9 +140,23 @@ let rec compile out decl_list =
           let env = compile_string_decl_expr env expr in
           compile_string_decl_code env code
       | CRETURN expr_opt ->
-          match expr_opt with
-          | None -> env
-          | Some (_, expr) -> compile_string_decl_expr env expr
+          begin
+            match expr_opt with
+            | None -> env
+            | Some (_, expr) -> compile_string_decl_expr env expr
+          end
+      | CTHROW (_, (_, expr)) -> compile_string_decl_expr env expr
+      | CTRY ((_, code), excp_list, code_opt) ->
+          let env = compile_string_decl_code env code in
+          let env = List.fold_left
+                    (fun env excp -> let _, _, (_, code') = excp in
+                                     compile_string_decl_code env code')
+                    env excp_list in
+          begin
+            match code_opt with
+            | Some (_, code') -> compile_string_decl_code env code'
+            | None -> env
+          end
     in
     let compile_string_decl_var_dec env var_dec =
       match var_dec with
@@ -139,7 +173,8 @@ let rec compile out decl_list =
     let compile_global_var_dec env var_dec =
       match var_dec with
       | CDECL (_, str) ->
-          let _ = env.globals <- (str :: env.globals) in
+          let new_globals = (str :: env.globals) in
+          let env = new_env env.locals new_globals env.functions env.strings env.current_offset in
           let _ = write ("\t.comm   " ^ str ^ ",8,8\n") in
           env
       | _ -> env
@@ -156,7 +191,8 @@ let rec compile out decl_list =
           (* If the function has not been already declared *)
           if not (find_function env str) then
             begin
-              env.functions <- (str :: env.functions);
+              let new_functions = (str :: env.functions) in
+              let env = new_env env.locals env.globals new_functions env.strings env.current_offset in
               write ("\t.text\n");
               write ("\t.globl " ^ str ^ "\n");
               write ("\t.type " ^ str ^ ", @function\n");
@@ -194,7 +230,7 @@ let rec compile out decl_list =
   (* Compile a list of variable declarations *)
   and compile_var_decl_list env decl_list =
     let offset = env.current_offset in
-    let _ = List.fold_left
+    let env = List.fold_left
     (fun env var_dec -> compile_var_dec env var_dec)
     env decl_list
     in
@@ -208,8 +244,10 @@ let rec compile out decl_list =
   and compile_var_dec env var_dec =
     match var_dec with
     | CDECL (_, str) ->
-        let _ = env.locals <- ((str, env.current_offset) :: env.locals) in
-        let _ = env.current_offset <- (env.current_offset - 8) in
+        let new_locals = ((str, env.current_offset) :: env.locals) in
+        let env = new_env new_locals env.globals env.functions env.strings env.current_offset in
+        let new_offset = (env.current_offset - 8) in
+        let env = new_env env.locals env.globals env.functions env.strings new_offset in
         env
     | CFUN (_, str, fun_var_dec_list, (_, code)) ->
         env
@@ -219,8 +257,8 @@ let rec compile out decl_list =
     | CBLOCK (var_dec_list, code_list) ->
         let code_list = List.map (fun loc_code -> let _, code = loc_code in code) code_list in
         (* Create a copy of the current environment *)
-        let local_env = new_env env.locals env.globals env.functions env.strings env.current_offset in
-        let local_env = compile_var_decl_list local_env var_dec_list in
+       (* let local_env = new_env env.locals env.globals env.functions env.strings env.current_offset in*)
+        let local_env = compile_var_decl_list env var_dec_list in
         List.iter (compile_code local_env) code_list
     | CEXPR (_, expr) ->
         compile_expr env expr
@@ -247,15 +285,19 @@ let rec compile out decl_list =
         write ("\tjmp   " ^ while_label ^ "\n");
         write (next_label ^ ":\n");
     | CRETURN expr_opt ->
-        match expr_opt with
-        | None ->
+        begin
+          match expr_opt with
+          | None ->
             write "\tmovq   $0, %rax\n";
             write ("\tleave\n");
             write ("\tret\n")
-        | Some (_, expr) ->
+          | Some (_, expr) ->
             compile_expr env expr;
             write ("\tleave\n");
             write ("\tret\n")
+        end
+    | CTHROW (str, (_, expr)) -> ()
+    | CTRY ((_, code), excp_list, loc_code_opt) -> ()
 
   and compile_expr env expr =
     match expr with

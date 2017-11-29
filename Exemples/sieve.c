@@ -24,7 +24,7 @@ int main (int argc, char **argv)
 	fflush (stderr);
 	exit (10);
       }
-    bits = malloc (8*n); // allouer de la place pour n entiers (booleens).
+    bits = malloc (8 *n); // allouer de la place pour n entiers (booleens).
     // Ca prend 32 fois trop de place.  Mais C-- n'a pas les operations &, |,
     // qui nous permettraient de manipuler des bits individuellement...
     if (bits==NULL)

@@ -1,9 +1,9 @@
 make
-gcc -S -fno-asynchronous-unwind-tables test.c -o gcc_test.s
+gcc -S -fno-asynchronous-unwind-tables Exemples/sieve.c -o gcc_test.s
 cat gcc_test.s
 printf "\n\n"
-./mcc -E test.c > mcc_test.s
+./mcc -E Exemples/sieve.c > mcc_test.s
 cat mcc_test.s
 gcc mcc_test.s
-./a.out
-echo $?
+./a.out 1000
+#echo $?

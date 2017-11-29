@@ -26,8 +26,8 @@ int main (int argc, char **argv)
     }
   {
     int n, res;
-
     n = atoi (argv[1]); /* conversion chaine -> entier. */
+
     if (n<0)
       {
 	fprintf (stderr, "Ah non, quand meme, un nombre positif ou nul, s'il-vous-plait...\n");
@@ -38,5 +38,4 @@ int main (int argc, char **argv)
     printf ("La factorielle de %d vaut %d (en tout cas, modulo 2^32...).\n",
 	    n, res);
   }
-  return 0;
 }
