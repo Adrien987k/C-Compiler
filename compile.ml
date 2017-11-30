@@ -2,13 +2,15 @@ open Cparse
 open Genlab
 
 type env = {
-  locals : (string * int) list ;      (* Locals variables with their offset from rbp *)
+  locals : (string * int) list ;       (* Locals variables with their offset from rbp *)
   globals : string list;
   functions : string list;
-  strings : (string * string) list;   (* The string with its label *)
-  current_offset : int;               (* Current offset from rbp,
+  strings : (string * string) list;    (* The string with its label *)
+  exceptions : (string * string) list;
+  current_exception : string option;
+  current_offset : int;                (* Current offset from rbp,
                                                  used to allocate memory for new local variables *)
-}
+ }
 
 let contain_global env str =
   List.exists (fun name -> (compare name str) = 0) env.globals
@@ -44,6 +46,17 @@ let find_string env str =
   with
     Not_found -> failwith ("Error: unknown string : " ^ str)
 
+(* Return the label of an exception *)
+let find_exception env str =
+  try
+    let entry = List.find (fun var -> let name, label = var in
+                          (compare name str) = 0)
+                          env.exceptions in
+    let _, label = entry in
+    label
+  with
+    Not_found -> failwith ("Error: unknown exception string : " ^ str)
+
 (* Return if the string [str] is in the environment [env] *)
 let exist_string env str =
   List.exists (fun str_lab ->
@@ -57,14 +70,18 @@ let empty_env = { locals = [];
                   globals = [];
                   functions = [];
                   strings = [];
+                  exceptions = [];
+                  current_exception = None;
                   current_offset = (-8) }
 
 (* Create and return copy of [env] *)
-let new_env locs globs fcts strs offset =
+let new_env locs globs fcts strs excpts excp offset =
    { locals = locs;
      globals = globs;
      functions = fcts;
      strings = strs;
+     exceptions = excpts;
+     current_exception = excp;
      current_offset = offset }
 
 let rec compile out decl_list =
@@ -99,7 +116,8 @@ let rec compile out decl_list =
             begin
               let str_label = genlab "LC" in
               let strings = ((str, str_label) :: env.strings) in
-              let env = new_env env.locals env.globals env.functions strings env.current_offset in
+              let env = new_env env.locals env.globals env.functions
+                        strings env.exceptions env.current_exception env.current_offset in
               write (str_label ^ ":\n");
               let str = String.escaped str in
               write ("\t.string \"" ^ str ^ "\"\n");
@@ -174,7 +192,8 @@ let rec compile out decl_list =
       match var_dec with
       | CDECL (_, str) ->
           let new_globals = (str :: env.globals) in
-          let env = new_env env.locals new_globals env.functions env.strings env.current_offset in
+          let env = new_env env.locals new_globals env.functions env.strings
+                    env.exceptions env.current_exception env.current_offset in
           let _ = write ("\t.comm   " ^ str ^ ",8,8\n") in
           env
       | _ -> env
@@ -192,7 +211,8 @@ let rec compile out decl_list =
           if not (find_function env str) then
             begin
               let new_functions = (str :: env.functions) in
-              let env = new_env env.locals env.globals new_functions env.strings env.current_offset in
+              let env = new_env env.locals env.globals new_functions
+                        env.strings env.exceptions env.current_exception env.current_offset in
               write ("\t.text\n");
               write ("\t.globl " ^ str ^ "\n");
               write ("\t.type " ^ str ^ ", @function\n");
@@ -223,7 +243,8 @@ let rec compile out decl_list =
           else failwith ("Error: function " ^ str ^ " is already defined")
     in
     List.fold_left (fun env var_dec ->
-                      let env = new_env [] env.globals env.functions env.strings (-8) in
+                      let env = new_env [] env.globals env.functions
+                                env.strings env.exceptions env.current_exception (-8) in
                       compile_function_dec env var_dec)
     env decl_list
 
@@ -245,9 +266,9 @@ let rec compile out decl_list =
     match var_dec with
     | CDECL (_, str) ->
         let new_locals = ((str, env.current_offset) :: env.locals) in
-        let env = new_env new_locals env.globals env.functions env.strings env.current_offset in
         let new_offset = (env.current_offset - 8) in
-        let env = new_env env.locals env.globals env.functions env.strings new_offset in
+        let env = new_env new_locals env.globals env.functions
+                  env.strings env.exceptions env.current_exception new_offset in
         env
     | CFUN (_, str, fun_var_dec_list, (_, code)) ->
         env
@@ -259,20 +280,23 @@ let rec compile out decl_list =
         (* Create a copy of the current environment *)
        (* let local_env = new_env env.locals env.globals env.functions env.strings env.current_offset in*)
         let local_env = compile_var_decl_list env var_dec_list in
-        List.iter (compile_code local_env) code_list
+        List.iter (fun code' -> let _ = compile_code local_env code' in ()) code_list;
+        env
     | CEXPR (_, expr) ->
-        compile_expr env expr
+        compile_expr env expr;
+        env
     | CIF ((_, expr), (_, code1), (_, code2)) ->
         compile_expr env expr;
         let false_label = genlab "false" in
         let next_label = genlab "next" in
         write "\tcmpq   $0, %rax\n";
         write ("\tje " ^ false_label ^ "\n");
-        compile_code env code1;
+        let _ = compile_code env code1 in
         write ("\tjmp " ^ next_label ^ "\n");
         write (false_label ^ ":\n");
-        compile_code env code2;
+        let _ = compile_code env code2 in
         write (next_label ^ ":\n");
+        env
     | CWHILE ((_, expr), (_, code')) ->
         compile_expr env expr;
         let while_label = genlab "while" in
@@ -280,10 +304,11 @@ let rec compile out decl_list =
         let next_label = genlab "next" in
         write "\tcmpq   $0, %rax\n";
         write ("\tje " ^ next_label ^ "\n");
-        compile_code env code';
+        let _ = compile_code env code' in
         compile_expr env expr;
         write ("\tjmp   " ^ while_label ^ "\n");
         write (next_label ^ ":\n");
+        env;
     | CRETURN expr_opt ->
         begin
           match expr_opt with
@@ -295,9 +320,33 @@ let rec compile out decl_list =
             compile_expr env expr;
             write ("\tleave\n");
             write ("\tret\n")
-        end
-    | CTHROW (str, (_, expr)) -> ()
-    | CTRY ((_, code), excp_list, loc_code_opt) -> ()
+        end;
+        env
+    | CTHROW (str, (_, expr)) ->
+        let label_excp = find_exception env str in
+        compile_expr env expr;
+        let env = new_env env.locals env.globals env.functions
+                  env.strings env.exceptions (Some str) env.current_offset in
+        write ("\tleave\n");
+        write ("\tret\n");
+        env
+    | CTRY ((_, code), excp_list, loc_code_opt) ->
+      let env =
+        List.fold_left
+          (fun env excp ->
+             let name, var, code = excp in
+             let label = genlab "excp" in
+             let new_exceptions = ((name, label) :: env.exceptions) in
+             new_env env.locals env.globals env.functions
+             env.strings new_exceptions env.current_exception env.current_offset
+          ) env excp_list in
+      let _ = compile_code env code in
+      begin
+        match loc_code_opt with
+        | None -> ()
+        | Some (_, code') -> let _ = compile_code env code' in ()
+      end;
+      env
 
   and compile_expr env expr =
     match expr with
@@ -326,6 +375,8 @@ let rec compile out decl_list =
                         (fun loc_expr -> let _, expr = loc_expr in expr)
                         expr_list
         in
+        write ("\tpushq   %r10\n");
+        write ("\tpushq   %r11\n");
         let registers = ["%rdi"; "%rsi"; "%rdx"; "%rcx"; "%r8"; "%r9"] in
         (* Arguments must be evaluate from left to right *)
         let expr_list = List.rev expr_list in
@@ -351,7 +402,9 @@ let rec compile out decl_list =
         let must_align =
           (not (List.exists (fun fct -> (String.compare fct str) = 0) functs_64_bits))
           && not (find_function env str) in
-        let _ = (if must_align then write "\tcltq\n") in ()
+        let _ = (if must_align then write "\tcltq\n") in
+        write ("\tpopq   %r10\n");
+        write ("\tpopq   %r11\n");
     | OP1 (mon_op, (_, expr)) ->
         compile_mon_op env mon_op expr
     | OP2 (bin_op, (_, expr1), (_, expr2)) ->
