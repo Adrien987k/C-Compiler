@@ -2,13 +2,19 @@
 
 int main () {
   try {
-    return 5;
-  } catch (F e) {
-
-  } finally {
-    printf("FIN\n");
+    if(fct()) printf("OK\n");
+  } catch(E e) {
+    printf("ERROR\n");
   }
-  printf("FAILED\n");
   return 0;
 }
 
+int fct() {
+  try {
+    throw E(1);
+  } finally {
+    //printf("FIN\n"); //PB Car apres call printf leave ret si excp_raised=1
+                       // 
+    return 1;
+  }
+}
