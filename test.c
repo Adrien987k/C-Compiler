@@ -1,8 +1,10 @@
 
 
 int main () {
+  int res;
   try {
-    if(fct()) printf("OK\n");
+    res = fct();
+    if(res) printf("OK with %d\n", res);
   } catch(E e) {
     printf("ERROR\n");
   }
@@ -11,10 +13,23 @@ int main () {
 
 int fct() {
   try {
-    throw E(1);
-  } finally {
-    //printf("FIN\n"); //PB Car apres call printf leave ret si excp_raised=1
-                       // 
-    return 1;
+    try {
+      throw F 1;
+    } catch (C c) {
+      printf("C = %d\n", c);
+    } catch (D d) {
+      printf("D = %d\n", d);
+    } finally {
+      printf("FIN 2\n");
+    }
+  } catch (A a) {
+      printf("A = %d\n", a);
+  } catch (F b) {
+      return 8;
+      printf("B = %d\n", b);
+  }
+  finally {
+    return 5;
+    printf("FIN 1\n");
   }
 }

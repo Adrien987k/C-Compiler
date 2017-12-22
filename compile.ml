@@ -174,6 +174,7 @@ let rec compile out decl_list =
           let env = compile_string_decl env fun_var_dec_list in
           compile_string_decl_code env code
     in
+    let env = compile_string_decl_expr env (STRING "SPECIAL DEBUG %d\n") in
     List.fold_left (fun env var_dec -> compile_string_decl_var_dec env var_dec) env decl_list
   in
 
@@ -191,6 +192,7 @@ let rec compile out decl_list =
       | _ -> env
     in
     write ("\t.comm   .exception_raised,8,8\n");
+    write ("\t.comm   .return_label_set,8,8\n");
     List.fold_left (fun env var_dec -> compile_global_var_dec env var_dec) env decl_list
   in
 
@@ -313,12 +315,17 @@ let rec compile out decl_list =
         (
           begin
             if env.in_finally then
-              write ("\tmovq   $0, .exception_raised(%rip)\n")
+              begin
+                write ("\tmovq   $0, .exception_raised(%rip)\n");
+                write ("\tmovq   $0, .return_label_set(%rip)\n");
+              end
             else ();
            end;
             if env.depth_try > 0  && ((String.compare env.finally_label "") != 0) then
               begin
                 let return_label = genlab "return" in
+                write ("\tmovq   $1, .return_label_set(%rip)\n");
+                write ("\tmovq   $" ^ return_label ^ ", %r13\n");
                 write ("\tjmp   " ^ env.finally_label ^ "\n");
                 write (return_label ^ ":\n");
                 new_env env.locals env.globals env.functions
@@ -346,10 +353,10 @@ let rec compile out decl_list =
         write ("\tmovq   $" ^ excp ^ ", %r14\n");
         begin
           if env.depth_try > 0 then
-            write ("\tjmp " ^ env.catch_label ^ "\n")
+            write ("\tjmp   " ^ env.catch_label ^ "\n")
           else ()
         end;
-        write ("\tjmp " ^ env.end_of_function ^ "\n");
+        write ("\tjmp   " ^ env.end_of_function ^ "\n");
         env
     | CTRY ((_, code), excp_list, loc_code_opt) ->
       let label_end = genlab "end" in
@@ -368,15 +375,15 @@ let rec compile out decl_list =
            label :: labs
         ) labels excp_list
       in
+      let old_catch_label = env.catch_label in
       let new_catch_label = genlab "start_catch" in
       let env = new_env env.locals env.globals env.functions
-                env.strings env.end_of_function
-                new_catch_label new_depth_try
+                env.strings env.end_of_function new_catch_label new_depth_try
                 finally_label env.return_label env.in_finally env.current_offset in
       let env = compile_code env code in
       write ("\tjmp   " ^ label_end ^ "\n");
       let env = new_env env.locals env.globals env.functions
-                env.strings env.end_of_function ""
+                env.strings env.end_of_function old_catch_label
                 (env.depth_try - 1) env.finally_label env.return_label env.in_finally env.current_offset in
       write (new_catch_label ^ ":\n");
       let _ = List.iteri
@@ -387,7 +394,7 @@ let rec compile out decl_list =
         ) excp_list
       in
       if (String.compare env.finally_label "") != 0 then
-        write ("\tjmp " ^ env.finally_label ^ "\n")
+        write ("\tjmp   " ^ env.finally_label ^ "\n")
       else
         write ("\tmovq   $42, %rax\n");
         write ("\tleave\n\tret\n");
@@ -421,18 +428,32 @@ let rec compile out decl_list =
             write (finally_label ^ ":\n");
             let env = new_env env.locals env.globals env.functions
                 env.strings env.end_of_function env.catch_label env.depth_try
-                env.catch_label env.return_label true env.current_offset in
+                env.finally_label env.return_label true env.current_offset in
             let env = compile_code env code' in
             let env = new_env env.locals env.globals env.functions
                 env.strings env.end_of_function env.catch_label env.depth_try
-                env.catch_label env.return_label false env.current_offset in
-            begin
-              if (String.compare env.return_label "") != 0 then
-                write ("\tjmp " ^ env.return_label ^ "\n")
-              else ();
-            end;
+                env.finally_label env.return_label false env.current_offset in
+            let next_label = genlab "next" in
+
+            (* write ("\tmovq   $.LC_1, %rdi\n");
+            write ("\tmovq   .return_label_set(%rip), %rsi\n");
+            write ("\tmovq   $0, %rax\n");
+            write ("\tcall   printf\n");
+            write ("\tcltq\n"); *)
+
+            write ("\tcmpq   $0, .return_label_set(%rip)\n");
+            write ("\tje " ^ next_label ^ "\n");
+            write ("\tmovq   $0, .return_label_set(%rip)\n");
+            write ("\tjmp *%r13\n");
+            write (next_label ^ ":\n");
+            let next_label = genlab "next" in
+            write ("\tcmpq   $0, .exception_raised(%rip)\n");
+            write ("\tje " ^ next_label ^ "\n");
+            write ("\tleave\n\tret\n");
+            write (next_label ^ ":\n");
+            write ("\tmovq   $0, .return_label_set(%rip)\n");
             env
-         end
+        end
        in
        env
 
@@ -493,15 +514,22 @@ let rec compile out decl_list =
         let _ = (if must_align then write "\tcltq\n") in
         (*write ("\tpopq   %r11\n");
         write ("\tpopq   %r10\n");*)
-        let excp_not_raised = genlab "excp_raised" in
+        let excp_not_raised = genlab "excp_not_raised" in
         write ("\tcmpq   $0, .exception_raised(%rip)\n");
         write ("\tje   " ^ excp_not_raised ^ "\n");
         begin
           if env.depth_try > 0 then
-            write ("\tjmp   " ^ env.catch_label ^ "\n")
+            begin
+ (*           write ("DEPTH TRY " ^ (string_of_int env.depth_try) ^  "\n"); *)
+            write ("\tjmp   " ^ env.catch_label ^ "\n");
+            end
+          else ();
+        end;
+        begin
+          if not env.in_finally then
+             write ("\tleave\n\tret\n")
           else ()
         end;
-        write ("\tleave\n\tret\n");
         write (excp_not_raised ^ ":\n");
     | OP1 (mon_op, (_, expr)) ->
         compile_mon_op env mon_op expr
@@ -598,6 +626,9 @@ let rec compile out decl_list =
               end
           | CALL (str, loc_expr_list) ->
               compile_expr env (CALL (str, loc_expr_list));
+              write ("\tmovq   %rax, %rcx\n");
+              compile_expr env expr2;
+              write ("\tmovq   (%rcx, %rax, 8), %rax\n")
           | _ -> failwith "Error: in the expression a[i], a must be a variable !"
         end
     | _ ->
@@ -658,5 +689,6 @@ let rec compile out decl_list =
   let env = compile_globals_var_decs env decl_list in
   write ("\t.section    .rodata\n");
   write ("\tmovq   $0, .exception_raised(%rip)\n");
+  write ("\tmovq   $0, .return_label_set(%rip)\n");
   let env = compile_string_decl env decl_list in
   let _ = compile_functions_decs env decl_list in ()
