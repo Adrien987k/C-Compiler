@@ -298,7 +298,7 @@ let rec compile out decl_list =
         write (next_label ^ ":\n");
         env;
     | CRETURN expr_opt ->
-        let env =
+        let env, return_set =
         (
           begin
             (* If a return is reached in a finally, there is no more exception to handled *)
@@ -312,6 +312,14 @@ let rec compile out decl_list =
           (* If we are in a try and there is a finally, the finally should be executed befere the return *)
           if env.depth_try > 0  && ((String.compare env.finally_label "") != 0) then
             begin
+              begin
+                match expr_opt with
+                | None ->
+                  write ("\tmovq   $0, %r15\n");
+                | Some (_, expr) ->
+                  compile_expr env expr;
+                  write ("\tmovq   %rax, %r15\n");
+              end;
               (* execute the finally and if no return is found in the finally, return here *)
               let return_label = genlab "return" in
               (* Indicate that there is a return in the current try *)
@@ -321,21 +329,25 @@ let rec compile out decl_list =
               (* Jump to the finally *)
               write ("\tjmp   " ^ env.finally_label ^ "\n");
               write (return_label ^ ":\n");
-              new_env env.locals env.globals env.functions env.strings env.catch_label env.depth_try
-                      "" env.in_finally env.current_offset;
+              (new_env env.locals env.globals env.functions env.strings env.catch_label env.depth_try
+                      "" env.in_finally env.current_offset, true);
             end
-          else env
+          else (env, false)
         )
         in
         begin
-          match expr_opt with
-          | None ->
-            write "\tmovq   $0, %rax\n";
-            write ("\tleave\n\tret\n");
-          | Some (_, expr) ->
-            compile_expr env expr;
-            write ("\tleave\n\tret\n");
+          if env.depth_try > 0 && return_set then
+            begin
+              write ("\tmovq   %r15, %rax\n");
+            end
+          else
+            match expr_opt with
+            | None ->
+              write "\tmovq   $0, %rax\n";
+            | Some (_, expr) ->
+              compile_expr env expr;
         end;
+        write ("\tleave\n\tret\n");
         env
     | CTHROW (str, (_, expr)) ->
         compile_expr env expr;

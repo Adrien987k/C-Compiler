@@ -96,14 +96,15 @@ Cela permet de vérifier si l'on se trouve dans un _try_, afin de vérifier si u
 
 * in\_finally : Un booléen indiquant si le code couramment exécuté se trouve dans une clause _finally_ ou non.
 
-L'environnement assembleur comporte les deux variables globales suivantes, déclarées et initialisées à 0 au début de la compilation d'un programme : 
+L'environnement assembleur comporte les deux variables globales suivantes, déclarées et initialisées à 0 au début de la compilation d'un programme :
 
 * .exception\_raised : cette variable est mise à 1 après l'éxecution d'un _throw_. Elle restera à 1 jusqu'à la gestion de l'exception levée.
 
-* .return\_label\_set : cette variable est mise à 1 juste avant l’exécution d'un _return_ se trouvant dans un bloc _try_. Elle permet à ce que juste après l’exécution d'un _finally_ n'atteignant pas de _return_, de savoir s'il reste un _return_ à exécuter dans le bloc _try_ correspondant. Si c'est le cas, un label aura été stocké dans le registre _r13_ qui est callee-save. Il suffit de sauter vers ce label en utilisant l'étoile : 
+* .return\_label\_set : cette variable est mise à 1 juste avant l’exécution d'un _return_ se trouvant dans un bloc _try_. Elle permet à ce que juste après l’exécution d'un _finally_ n'atteignant pas de _return_, de savoir s'il reste un _return_ à exécuter dans le bloc _try_ correspondant. Si c'est le cas, un label aura été stocké dans le registre _r13_ qui est callee-save. Il suffit de sauter vers ce label en utilisant l'étoile :
 	```
 	jmp   *%r13
 	```
+De plus, la valeur à retourner est stockée dans le registre callee-save _r15_. En effet, si c'est une variable qui est retournée, le bloc _finally_ peut potentiellement la modifier alors qu'il faut retourner sa valeur au moment de l'arrivée sur le _return_
 
 #### Stratégie de compilation
 
@@ -119,14 +120,14 @@ La première étape consiste à déclarer et initialiser les deux variables asse
 * Compilation de CRETURN : 
     * Si on se trouve dans un bloc _finally_, on remet 0 dans _.exception\_raised_ et _.return\_label\_set_. En effet, dans ce cas on quitte la fonction normalement, toutes les exceptions ont été gérées
     * Si on se trouve dans un bloc _try_, et que ce _try_ comporte un bloc _finally_ (c'est le cas si _env.finally\_label_ est différent de la chaîne de caractère vide), 
-    on génère un label de retour que l'on stocke dans le registre _r13_, on met la variable _.return\_label\_set_ à 1
-    * On éxecute le bloc _finally_ en sautant sur le label stocké dans _env.finally_label_
+    on génère un label de retour que l'on stocke dans le registre _r13_, on met la variable _.return\_label\_set_ à 1. On exécute l'expression à retourner et on stocke sa valeur dans le registre _r15_
+    * On exécute le bloc _finally_ en sautant sur le label stocké dans _env.finally_label_
     * On produit le code 
     ```java
     return_label:
     ```
     Où _return\_label_ est le label généré.
-    * Enfin on peut compiler l'expression _return_ comme dans la première partie du projet
+    * Si on a sauvegardé une valeur dans _r15_, on retourne cette valeur. Sinon on compile l'expression _return_ comme dans la première partie du projet
     
 * Compilation du CTRY :
     * On génère un label permettant de sauter à la fin des catchs
@@ -147,17 +148,21 @@ La première étape consiste à déclarer et initialiser les deux variables asse
     * On compile le code associé en passant dans l’environnement la variable _env.in_finally_ à vrai
     * Si l'on arrive à la fin, c'est à dire qu'aucun _return_ n'a été rencontré :
     On vérifie la présence d'un _return_ rencontré dans le bloc _try_ grâce à la variable _.return\_label\_set_. Si cette variable vaut 1, on exécute le _return_ comme expliqué plus haut
-    * Sinon on vérifie si une exception a été levée dans le bloc _finally_ auquel cas on quitte la fonction avec _leave_ et _ret_ 
-    
+    * Sinon on vérifie si une exception a été levée dans le bloc _finally_ auquel cas on quitte la fonction avec _leave_ et _ret_
+
 * Compilation du CALL
     * Après avoir éxecuté l'instruction _call_, on vérifie si la variable _.exception\_raised_ est à 1 auquel cas une exception a été levée dans la fonction
     Si c'est le cas,
         * Si on se trouve dans un bloc _try_, on saute sur le label stocké dans _env.catch_label_
         * Si on ne se trouve pas dans un bloc _finally_ on quitte la fonction
         (en effet dans le cas d'un bloc _finally_ il faut continuer et terminer l’exécution du bloc)
-        
+
 Le reste du code n'est pas modifié.
-    
+
+#### Avantages et inconvéniants
+
+* L'utilisation d'un type enregistrement permet d'avoir un unique argument _env_ à passer en paramètre des fonctions. Cependant une modification d'un champ de l'environnement nécessite de faire une copie de celui-ci, ce qui engendre une syntaxe lourde
+
 ----------
 
 
