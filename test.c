@@ -14,22 +14,22 @@ int main () {
 int fct() {
   try {
     try {
-      throw F 1;
+      return 8;
     } catch (C c) {
       printf("C = %d\n", c);
     } catch (D d) {
       printf("D = %d\n", d);
     } finally {
+      return 15;
       printf("FIN 2\n");
     }
   } catch (A a) {
       printf("A = %d\n", a);
-  } catch (F b) {
-      return 8;
+  } catch (B b) {
+      return 9;
       printf("B = %d\n", b);
-  }
-  finally {
-    return 5;
+  } finally {
+    return 12;
     printf("FIN 1\n");
   }
 }

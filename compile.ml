@@ -9,7 +9,7 @@ type env = {
   catch_label : string;                (* When compiling a CTRY, the current label to jump to in order to
                                           be at the start of the corresponding catchs *)
   depth_try : int;                     (* The current depth of nested trys. Ex: try { try { depth = 2 } } *)
-  finally_label : string;              (* The label to jump to in order to exectute the current finally *)
+  finally_labels : string list;              (* The label to jump to in order to exectute the current finally *)
   in_finally : bool;                   (* Indicate if the code is currently inside a finally *)
   current_offset : int;                (* Current offset from rbp,
                                                  used to allocate memory for new local variables *)
@@ -64,7 +64,7 @@ let empty_env = { locals = [];
                   strings = [];
                   catch_label = "";
                   depth_try = 0;
-                  finally_label = "";
+                  finally_labels = [];
                   in_finally = false;
                   current_offset = (-8) }
 
@@ -76,7 +76,7 @@ let new_env locs globs fcts strs ctch_lab d_ctch fin_lab in_fnl offset =
      strings = strs;
      catch_label = ctch_lab;
      depth_try = d_ctch;
-     finally_label = fin_lab;
+     finally_labels = fin_lab;
      in_finally = in_fnl;
      current_offset = offset }
 
@@ -96,7 +96,7 @@ let rec compile out decl_list =
               let strings = ((str, str_label) :: env.strings) in
               let env = new_env env.locals env.globals env.functions
                         strings env.catch_label
-                        env.depth_try env.finally_label env.in_finally env.current_offset in
+                        env.depth_try env.finally_labels env.in_finally env.current_offset in
               write (str_label ^ ":\n");
               let str = String.escaped str in
               write ("\t.string \"" ^ str ^ "\"\n");
@@ -177,7 +177,7 @@ let rec compile out decl_list =
           let new_globals = (str :: env.globals) in
           let env = new_env env.locals new_globals env.functions env.strings
                     env.catch_label env.depth_try
-                    env.finally_label env.in_finally env.current_offset in
+                    env.finally_labels env.in_finally env.current_offset in
           let _ = write ("\t.comm   " ^ str ^ ",8,8\n") in
           env
       | _ -> env
@@ -199,7 +199,7 @@ let rec compile out decl_list =
               let new_functions = (str :: env.functions) in
               let env = new_env env.locals env.globals new_functions
                         env.strings env.catch_label
-                        env.depth_try env.finally_label env.in_finally env.current_offset in
+                        env.depth_try env.finally_labels env.in_finally env.current_offset in
               write ("\t.text\n");
               write ("\t.globl " ^ str ^ "\n");
               write ("\t.type " ^ str ^ ", @function\n");
@@ -232,7 +232,7 @@ let rec compile out decl_list =
     List.fold_left (fun env var_dec ->
                       let env = new_env [] env.globals env.functions
                                 env.strings env.catch_label env.depth_try
-                                env.finally_label env.in_finally (-8) in
+                                env.finally_labels env.in_finally (-8) in
                       compile_function_dec env var_dec)
     env decl_list
 
@@ -257,7 +257,7 @@ let rec compile out decl_list =
         let new_offset = (env.current_offset - 8) in
         let env = new_env new_locals env.globals env.functions
                   env.strings env.catch_label env.depth_try
-                  env.finally_label env.in_finally new_offset in
+                  env.finally_labels env.in_finally new_offset in
         env
     | CFUN (_, str, fun_var_dec_list, (_, code)) ->
         env
@@ -310,7 +310,7 @@ let rec compile out decl_list =
             else ();
           end;
           (* If we are in a try and there is a finally, the finally should be executed befere the return *)
-          if env.depth_try > 0  && ((String.compare env.finally_label "") != 0) then
+          if env.depth_try > 0  && (List.length env.finally_labels) > 0 then
             begin
               begin
                 match expr_opt with
@@ -320,17 +320,19 @@ let rec compile out decl_list =
                   compile_expr env expr;
                   write ("\tmovq   %rax, %r15\n");
               end;
-              (* execute the finally and if no return is found in the finally, return here *)
-              let return_label = genlab "return" in
-              (* Indicate that there is a return in the current try *)
-              write ("\tmovq   $1, .return_label_set(%rip)\n");
-              (* Store the label to get to it in r13 *)
-              write ("\tmovq   $" ^ return_label ^ ", %r13\n");
-              (* Jump to the finally *)
-              write ("\tjmp   " ^ env.finally_label ^ "\n");
-              write (return_label ^ ":\n");
+              List.iter (fun finally_label ->
+                  (* execute the finally and if no return is found in the finally, return here *)
+                  let return_label = genlab "return" in
+                  (* Indicate that there is a return in the current try *)
+                  write ("\tmovq   $1, .return_label_set(%rip)\n");
+                  (* Store the label to get to it in r13 *)
+                  write ("\tmovq   $" ^ return_label ^ ", %r13\n");
+                  (* Jump to the finally *)
+                  write ("\tjmp   " ^ finally_label ^ "\n");
+                  write (return_label ^ ":\n");
+                ) env.finally_labels;
               (new_env env.locals env.globals env.functions env.strings env.catch_label env.depth_try
-                      "" env.in_finally env.current_offset, true);
+                      [] env.in_finally env.current_offset, true);
             end
           else (env, false)
         )
@@ -365,11 +367,13 @@ let rec compile out decl_list =
         env
     | CTRY ((_, code), excp_list, loc_code_opt) ->
       let label_end = genlab "end" in
-      let finally_label =
+      let new_finally_labels, current_finally_label =
         begin
           match loc_code_opt with
-          | Some _ -> genlab "finally"
-          | None -> ""
+          | Some _ ->
+              let cur_f_lb = (genlab "finally") in
+              cur_f_lb :: env.finally_labels, cur_f_lb
+          | None -> env.finally_labels, ""
         end
       in
       let new_depth_try = (env.depth_try) + 1 in
@@ -386,12 +390,12 @@ let rec compile out decl_list =
       let new_catch_label = genlab "start_catch" in
       let env = new_env env.locals env.globals env.functions
                 env.strings new_catch_label new_depth_try
-                finally_label env.in_finally env.current_offset in
+                new_finally_labels env.in_finally env.current_offset in
       let env = compile_code env code in
       write ("\tjmp   " ^ label_end ^ "\n");
       let env = new_env env.locals env.globals env.functions
                 env.strings old_catch_label
-                (env.depth_try - 1) env.finally_label env.in_finally env.current_offset in
+                (env.depth_try - 1) env.finally_labels env.in_finally env.current_offset in
       write (new_catch_label ^ ":\n");
       (* When an exception is raised, For each catch search for the correct catch to jump to *)
       let _ = List.iteri
@@ -403,8 +407,8 @@ let rec compile out decl_list =
       in
       (* If no exception corresponds to the raised exception, execute the finally if there is one.
          Otherwise put a number diffrent from 0 in rax and leave the function *)
-      if (String.compare env.finally_label "") != 0 then
-        write ("\tjmp   " ^ env.finally_label ^ "\n")
+      if (List.length env.finally_labels) > 0 then
+        write ("\tjmp   " ^ (List.hd env.finally_labels) ^ "\n")
       else
         write ("\tmovq   $42, %rax\n");
         write ("\tleave\n\tret\n");
@@ -418,7 +422,7 @@ let rec compile out decl_list =
            let new_offset = (env.current_offset - 8) in
            let env = new_env new_locals env.globals env.functions
                      env.strings env.catch_label
-                     env.depth_try env.finally_label env.in_finally new_offset
+                     env.depth_try env.finally_labels env.in_finally new_offset
            in
            write ("\tmovq   $0, .exception_raised(%rip)\n");
            write ("\tsubq   $8, %rsp\n");
@@ -427,23 +431,30 @@ let rec compile out decl_list =
            write ("\tjmp   " ^ label_end ^ "\n")
         ) excp_list
       in
+      let old_finally_labels =
+        begin
+          match env.finally_labels with
+          | [] -> []
+          | _ :: old_f_lbs -> old_f_lbs
+        end
+      in
       let env = new_env env.locals env.globals env.functions
                 env.strings env.catch_label env.depth_try
-                "" env.in_finally env.current_offset in
+                old_finally_labels env.in_finally env.current_offset in
       write (label_end ^ ":\n");
       (* Compile the finally if there is one *)
       begin
         match loc_code_opt with
         | None -> env
         | Some (_, code') ->
-          write (finally_label ^ ":\n");
+          write (current_finally_label ^ ":\n");
           let env = new_env env.locals env.globals env.functions
               env.strings env.catch_label env.depth_try
-              env.finally_label true env.current_offset in
+              env.finally_labels true env.current_offset in
           let env = compile_code env code' in
           let env = new_env env.locals env.globals env.functions
               env.strings  env.catch_label env.depth_try
-              env.finally_label false env.current_offset in
+              env.finally_labels false env.current_offset in
           (* Check if there were a return in the try and if yes, jump to it *)
           let next_label = genlab "next" in
           write ("\tcmpq   $0, .return_label_set(%rip)\n");
