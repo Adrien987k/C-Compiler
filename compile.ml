@@ -330,7 +330,7 @@ let rec compile out decl_list =
                   (* Jump to the finally *)
                   write ("\tjmp   " ^ finally_label ^ "\n");
                   write (return_label ^ ":\n");
-                ) env.finally_labels;
+               ) env.finally_labels;
               (new_env env.locals env.globals env.functions env.strings env.catch_label env.depth_try
                       [] env.in_finally env.current_offset, true);
             end
