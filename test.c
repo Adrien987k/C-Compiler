@@ -3,7 +3,7 @@
 int main () {
   int res;
   try {
-    res = fct();
+    res = fct(10);
     if(res) printf("OK with %d\n", res);
   } catch(E e) {
     printf("ERROR\n");
@@ -11,11 +11,11 @@ int main () {
   return 0;
 }
 
-int fct() {
+int fct(int i) {
   try {
     try {
       try {
-        return 8;
+        throw B(i);
       } catch (C c) {
         printf("C = %d\n", c);
       } catch (D d) {
@@ -27,11 +27,11 @@ int fct() {
     } catch (A a) {
       printf("A = %d\n", a);
     } catch (B b) {
-      return 9;
       printf("B = %d\n", b);
+      if (b > 0) fct(b - 1);
     } finally {
       printf("FIN 1\n");
-      //return 12;
+      return 12;
     }
   } catch(E e) {
 

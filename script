@@ -9,17 +9,17 @@ cat mcc_test.s
 clang mcc_test.s
 ./a.out
 
-#gcc mcc_test1.s
-#./a.out
-#echo ""
+gcc mcc_test1.s
+./a.out
+echo ""
 
-#gcc mcc_test2.s
-#./a.out
-#echo ""
+gcc mcc_test2.s
+./a.out
+echo ""
 
-#gcc mcc_test3.s
-#./a.out
-#echo ""
+gcc mcc_test3.s
+./a.out
+echo ""
 
-#gcc mcc_test4.s
-#./a.out
+gcc mcc_test4.s
+./a.out

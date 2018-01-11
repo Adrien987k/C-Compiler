@@ -9,7 +9,7 @@ type env = {
   catch_label : string;                (* When compiling a CTRY, the current label to jump to in order to
                                           be at the start of the corresponding catchs *)
   depth_try : int;                     (* The current depth of nested trys. Ex: try { try { depth = 2 } } *)
-  finally_labels : string list;              (* The label to jump to in order to exectute the current finally *)
+  finally_labels : string list;        (* The labels to jump to in order to exectute the current finallys *)
   in_finally : bool;                   (* Indicate if the code is currently inside a finally *)
   current_offset : int;                (* Current offset from rbp,
                                                  used to allocate memory for new local variables *)
@@ -320,6 +320,7 @@ let rec compile out decl_list =
                   compile_expr env expr;
                   write ("\tmovq   %rax, %r15\n");
               end;
+              (* for each finally labels *)
               List.iter (fun finally_label ->
                   (* execute the finally and if no return is found in the finally, return here *)
                   let return_label = genlab "return" in
@@ -431,6 +432,7 @@ let rec compile out decl_list =
            write ("\tjmp   " ^ label_end ^ "\n")
         ) excp_list
       in
+      (* Delete the first label of the list, retore the the old finally labels list *)
       let old_finally_labels =
         begin
           match env.finally_labels with
